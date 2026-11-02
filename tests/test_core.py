@@ -158,7 +158,7 @@ def boot_inventory(grub=False):
     pool["state"] = "DEGRADED"
     pool["children"][0]["state"] = "DEGRADED"
     snap["disks"] = [d for d in snap["disks"] if d["serial"] != "DEMO_BOOT_B"]
-    snap["boot"]["status"] = "ABCD-1234 is configured with: " + ("grub" if grub else "uefi") + " (versions: 6.x)"
+    demo.add_boot_observations(snap, "grub" if grub else "systemd")
     return snap
 
 

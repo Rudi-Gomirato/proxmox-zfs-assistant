@@ -13,6 +13,7 @@ jobs:
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest]
+        python: ['3.11', '3.12']
     runs-on: ${{ matrix.os }}
     env:
       QT_QPA_PLATFORM: offscreen
@@ -20,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python }}
           cache: pip
       - name: Linux Qt libraries
         if: runner.os == 'Linux'
@@ -35,10 +36,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
           cache: pip
       - run: python -m pip install -r requirements-dev.txt
       - run: python scripts/build_windows.py
+      - name: Smoke test packaged application
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $application = Start-Process -FilePath "$PWD/dist/ProxmoxZfsAssistant/ProxmoxZfsAssistant.exe" -ArgumentList @('--data-dir', "$PWD/test-output/ci-app", '--screenshot', "$PWD/test-output/ci-demo.png") -WindowStyle Hidden -PassThru
+          if (-not $application.WaitForExit(30000)) {
+            Stop-Process -Id $application.Id -Force
+            throw 'Packaged application startup timed out'
+          }
+          if ($application.ExitCode -ne 0 -or -not (Test-Path "$PWD/test-output/ci-demo.png")) {
+            throw 'Packaged application demo did not start'
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: ProxmoxZfsAssistant-Windows

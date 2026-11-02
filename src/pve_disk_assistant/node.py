@@ -20,14 +20,17 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import __version__
+from .boot import boot_report, collect_boot, inspect_esp_namespace
 from .core import (SafetyError, classify, data_groups, digest, disk_for, leaves,
-                   merge_guids, parse_status, plan_replacement, safety_fingerprint, topology_fingerprint)
+                   merge_guids, parse_status, plan_replacement, safety_fingerprint, topology_fingerprint, ESP, disk_for_member)
 
 STATE = Path("/var/lib/pve-disk-assistant")
 HELPER = "/usr/local/lib/pve-disk-assistant/helper.pyz"
 PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 TOOLS = ("zpool", "zfs", "lsblk", "findmnt", "wipefs", "smartctl", "sfdisk", "sgdisk",
-         "partprobe", "udevadm", "pveversion", "proxmox-boot-tool", "shutdown")
+         "partprobe", "udevadm", "pveversion", "proxmox-boot-tool", "shutdown", "blkid", "fsck.fat",
+         "mount", "umount", "unshare", "efibootmgr")
 
 
 def utcnow():
@@ -117,7 +120,7 @@ def discover_disks(blocks):
                     "number": int(read_text("/sys/class/block/" + os.path.basename(ppath) + "/partition") or "0"),
                     "size": int(child.get("size") or 0), "parttype": child.get("parttype") or "",
                     "uuid": child.get("uuid") or "", "partuuid": child.get("partuuid") or "",
-                    "fstype": child.get("fstype") or ""})
+                    "fstype": child.get("fstype") or "", "mounts": [m for m in child.get("mountpoints", []) or [] if m]})
             disk["mounts"].extend(m for m in child.get("mountpoints", []) or [] if m)
             if child.get("type") not in {"part"}:
                 disk["holders"].append(child["name"])
@@ -187,7 +190,9 @@ def collect():
             ids = sorted(set(re.findall(r"(?:^|\s|,)([A-Za-z0-9_-]+):[^\s,]+", content, re.M)) & {s["id"] for s in stores})
             guests.append({"id": Path(path).stem, "name": name[1] if name else "", "kind": kind, "storages": ids})
     boot = run(["proxmox-boot-tool", "status"])
-    snapshot = {"schema": 1, "helper_version": "0.1.0", "collected_at": utcnow(),
+    boot_started = re.search(r"^btime (\d+)$", read_text("/proc/stat"), re.M)
+    snapshot = {"schema": 2, "helper_version": __version__, "collected_at": utcnow(),
+        "boot_id": read_text("/proc/sys/kernel/random/boot_id"), "boot_started_at": int(boot_started[1]) if boot_started else 0,
         "host_id": read_text("/etc/machine-id"), "hostname": os.uname().nodename.split(".")[0],
         "pve_version": version["out"].splitlines()[0] if version["out"] else "",
         "root": root, "mounts": mounts, "pools": pools, "disks": discover_disks(lb.get("blockdevices", [])),
@@ -197,7 +202,9 @@ def collect():
     if not pools:
         snapshot["issues"].append("Nessun pool ZFS importato identificato.")
         snapshot["complete"] = False
-    return classify(snapshot)
+    classify(snapshot)
+    snapshot["boot"] = collect_boot(snapshot, run, HELPER)
+    return snapshot
 
 
 def state_dir():
@@ -252,6 +259,7 @@ def prepare(request):
     plan = plan_replacement(snapshot, request)
     plan["id"] = uuid.uuid4().hex
     plan["created_at"] = time.time()
+    plan["helper_version"] = __version__
     plan["approval_digest"] = digest(plan)
     plan["state"] = "PREVIEW"
     plan["events"] = []
@@ -273,6 +281,8 @@ def submit(request):
         plan = load_record(request.get("id"))
         if plan["state"] != "PREVIEW":
             raise SafetyError("Piano già inviato: consultare l'esito, non inviarlo di nuovo.")
+        if plan.get("helper_version") != __version__:
+            raise SafetyError("Piano creato con una versione precedente dell'helper: generare una nuova anteprima.")
         if plan["blocks"]:
             raise SafetyError("Piano bloccato: " + "; ".join(plan["blocks"]))
         if time.time() - plan["created_at"] > 600:
@@ -284,7 +294,7 @@ def submit(request):
         # A queued worker may not yet own the operation lock.
         for path in state_dir().glob("*.json"):
             entry = json.loads(path.read_text())
-            if entry["id"] != plan["id"] and entry.get("state") in {"QUEUED", "RUNNING", "UNKNOWN"}:
+            if entry["id"] != plan["id"] and entry.get("state") in {"QUEUED", "RUNNING", "WAITING_RESILVER", "MONITORING", "UNKNOWN"}:
                 raise SafetyError("Un intervento è già in coda, attivo o con esito ignoto.")
         fresh = collect()
         refreshed = plan_replacement(fresh, plan["request"])
@@ -338,6 +348,65 @@ def verify_copied_layout(plan):
         raise SafetyError("GPT nuova non coerente con il riferimento o GUID non rigenerati.")
 
 
+def bind_esp(plan):
+    format_or_init = next((s for s in plan["steps"] if s["argv"][:2] in (
+        ["proxmox-boot-tool", "format"], ["proxmox-boot-tool", "init"])), None)
+    if not format_or_init:
+        raise SafetyError("Nessuna ESP destinataria nel piano di boot.")
+    path = format_or_init["argv"][2]
+    verify_partition(plan, path)
+    result = run(["lsblk", "--json", "--nodeps", "--output", "TYPE,PARTTYPE,PARTUUID,MOUNTPOINTS", path])
+    rows = json_output(result).get("blockdevices", [])
+    if (result["code"] or len(rows) != 1 or rows[0].get("type") != "part"
+            or str(rows[0].get("parttype", "")).lower() != ESP or not rows[0].get("partuuid")
+            or any(rows[0].get("mountpoints", []) or [])):
+        raise SafetyError("ESP destinataria non verificata come partizione GPT EFI libera da mount.")
+    actual = {"path": path, "partuuid": rows[0]["partuuid"].lower()}
+    expected = plan.get("expected_esp")
+    if expected and expected.get("partuuid", "").lower() != actual["partuuid"]:
+        raise SafetyError("PARTUUID della ESP selezionata cambiato: nessuna formattazione.")
+    if os.path.realpath(path) == os.path.realpath(plan["new_member"]):
+        raise SafetyError("La ESP coincide con il membro ZFS: operazione vietata.")
+    plan["expected_esp"] = actual
+
+
+def verify_boot_write(plan, step):
+    if step["phase"] != "boot":
+        return
+    bind_esp(plan)
+    path = step["argv"][2]
+    if path != plan["expected_esp"]["path"]:
+        raise SafetyError("Comando riferito a una ESP diversa dal bersaglio approvato.")
+    if step["argv"][1] == "format":
+        probe = run(["blkid", "-p", "-o", "export", path])
+        wipe = run(["wipefs", "--json", path])
+        if probe["code"] != 2 or wipe["code"] or json_output(wipe).get("signatures") != []:
+            raise SafetyError("ESP non più priva di firme: formattazione annullata, nessuna forzatura.")
+
+
+def boot_resume_checks(plan, snapshot):
+    verify_target(plan)
+    pool = next((p for p in snapshot["pools"] if p["guid"] == plan["pool_guid"]), None)
+    if not pool or not zfs_ready(plan, snapshot, pool):
+        raise SafetyError("Il resilver non è concluso o il mirror non è verificato.")
+    report = boot_report(snapshot, pool)
+    source = plan.get("source") or {}
+    if not any(r["serial"] == source.get("serial") and r["configuration_ready"] for r in report["disks"]):
+        raise SafetyError("Il membro di riferimento non ha più una configurazione EFI verificata.")
+    bind_esp(plan)
+
+
+def zfs_ready(plan, snapshot, pool):
+    target = next((d for d in snapshot["disks"] if d.get("by_id") == plan["target"]["by_id"]
+                   and d.get("serial") == plan["target"]["serial"]), None)
+    members = leaves(pool)
+    return (snapshot["complete"] and not pool.get("warnings") and target is not None
+            and any(disk_for_member(snapshot, m) == target for m in members)
+            and pool["state"] == "ONLINE" and pool["errors"] == "No known data errors"
+            and all(m["state"] in {"ONLINE", "HEALTHY"} and len(m["errors"]) == 3 and not any(m["errors"]) for m in members)
+            and "in progress" not in pool["scan"])
+
+
 def perform_job(identifier):
     # submit() owns the same lock until its response is durably recorded.
     for attempt in range(20):
@@ -347,20 +416,26 @@ def perform_job(identifier):
                 if plan["state"] != "QUEUED":
                     return
                 fresh = collect()
-                proposed = plan_replacement(fresh, plan["request"])
-                if proposed["blocks"] or proposed["fingerprint"] != plan["fingerprint"]:
-                    plan["state"] = "BLOCKED"
-                    plan["error"] = "Verifica immediata fallita: inventario cambiato o prerequisiti non soddisfatti."
-                    save_record(plan)
-                    return
+                if plan.get("execution_phase") == "boot":
+                    boot_resume_checks(plan, fresh)
+                else:
+                    proposed = plan_replacement(fresh, plan["request"])
+                    if proposed["blocks"] or proposed["fingerprint"] != plan["fingerprint"]:
+                        plan["state"] = "BLOCKED"
+                        plan["error"] = "Verifica immediata fallita: inventario cambiato o prerequisiti non soddisfatti."
+                        save_record(plan)
+                        return
                 plan["state"] = "RUNNING"
                 save_record(plan)
                 try:
-                    for index, step in enumerate(plan["steps"]):
+                    for index in range(plan.get("next_step", 0), len(plan["steps"])):
+                        step = plan["steps"][index]
                         verify_target(plan)
                         if step["phase"] in {"replace", "offline"}:
                             if plan.get("source"):
                                 verify_copied_layout(plan)
+                            if step["phase"] == "replace" and plan["role"] in {"BOOT", "MISTO"}:
+                                bind_esp(plan)
                             # Recheck remaining members immediately before changing ZFS.
                             current = collect()
                             current_pool = next((p for p in current["pools"] if p["guid"] == plan["pool_guid"]), None)
@@ -375,6 +450,7 @@ def perform_job(identifier):
                             verify_partition(plan, step["argv"][-1])
                         if step["phase"] == "boot":
                             verify_partition(plan, step["argv"][2])
+                            verify_boot_write(plan, step)
                         event = {"step": index, "command": step["command"], "started_at": utcnow(), "state": "STARTED"}
                         plan["events"].append(event)
                         save_record(plan)
@@ -383,6 +459,13 @@ def perform_job(identifier):
                         save_record(plan)
                         if result["code"]:
                             raise SafetyError("Comando fallito. Non ripetere automaticamente: " + step["command"])
+                        plan["next_step"] = index + 1
+                        if step["phase"] == "replace" and plan["role"] in {"BOOT", "MISTO"}:
+                            plan["state"] = "WAITING_RESILVER"
+                            plan["boot_test"] = "NON_TESTATO"
+                            save_record(plan)
+                            return
+                        save_record(plan)
                     if plan.get("action") == "offline":
                         check = collect()
                         p = next((p for p in check["pools"] if p["guid"] == plan["pool_guid"]), None)
@@ -392,7 +475,7 @@ def perform_job(identifier):
                         plan["state"] = "READY_FOR_REMOVAL"
                     else:
                         plan["state"] = "MONITORING"
-                    plan["boot_test"] = "DA_ESEGUIRE_IN_MANUTENZIONE" if plan.get("action") != "offline" and plan["role"] in {"BOOT", "MISTO"} else "NON_APPLICABILE"
+                    plan["boot_test"] = "NON_TESTATO" if plan.get("action") != "offline" and plan["role"] in {"BOOT", "MISTO"} else "NON_APPLICABILE"
                 except Exception as exc:
                     plan["state"] = "UNKNOWN" if plan["events"] and plan["events"][-1]["state"] == "STARTED" else "FAILED"
                     plan["error"] = str(exc)
@@ -408,21 +491,63 @@ def perform_job(identifier):
 
 
 def get_status(identifier):
+    record_path(identifier)
+    with locked("status-" + identifier):
+        return _get_status(identifier)
+
+
+def _get_status(identifier):
     plan = load_record(identifier)
-    if plan["state"] == "MONITORING":
+    is_boot = plan.get("role") in {"BOOT", "MISTO"} and plan.get("action") != "offline"
+    review_states = {"MONITORING", "WAITING_RESILVER", "BOOT_REVIEW_REQUIRED", "BOOT_TEST_REQUIRED", "ZFS_REVIEW_REQUIRED"}
+    if plan["state"] in review_states or (is_boot and plan["state"] == "COMPLETED"):
         snapshot = collect()
         pool = next((p for p in snapshot["pools"] if p["guid"] == plan["pool_guid"]), None)
-        target = disk_for(snapshot, plan["new_member"])
-        members = leaves(pool) if pool else []
-        target_in_pool = target is not None and any(disk_for(snapshot, m["name"]) == target for m in members)
         plan["scan"] = pool.get("scan", "") if pool else "Pool non rilevato"
         plan["scan_percent"] = pool.get("scan_percent") if pool else None
         plan["last_checked"] = snapshot["collected_at"]
-        if (snapshot["complete"] and target_in_pool and pool["state"] == "ONLINE"
-                and all(m["state"] in {"ONLINE", "HEALTHY"} and not any(m["errors"]) for m in members)
-                and pool["errors"] == "No known data errors" and "in progress" not in pool["scan"]):
-            plan["state"] = "COMPLETED"
-            plan["completed_at"] = utcnow()
+        ready = bool(pool and zfs_ready(plan, snapshot, pool))
+        plan["zfs_state"] = "OK" if ready else "IN_CORSO" if "in progress" in plan["scan"] else "DA_VERIFICARE"
+        plan["resilver_state"] = "OK" if ready else plan["zfs_state"]
+        if is_boot and pool:
+            plan["boot_validation"] = boot_report(snapshot, pool)
+        if ready and plan["state"] == "WAITING_RESILVER":
+            # These future ESP steps were explicitly approved in the original
+            # plan. Resume only the persisted cursor, never partition/replace.
+            with locked():
+                persisted = load_record(identifier)
+                if persisted["state"] != "WAITING_RESILVER":
+                    return persisted
+                try:
+                    boot_resume_checks(plan, snapshot)
+                    plan["execution_phase"] = "boot"
+                    plan["state"] = "QUEUED"
+                    save_record(plan)
+                    spawn_worker(identifier)
+                except Exception as exc:
+                    plan["state"], plan["error"] = "BOOT_REVIEW_REQUIRED", str(exc)
+                    save_record(plan)
+            return plan
+        if ready:
+            if is_boot:
+                report = plan["boot_validation"]
+                expected = {plan["target"]["serial"], (plan.get("source") or {}).get("serial", "")}
+                proofs = plan.get("autonomous_tests", {})
+                tested = ("" not in expected and len(expected) == 2 and all(proofs.get(s, {}).get("state") == "VERIFIED_BY_OPERATOR" for s in expected)
+                          and len({proofs[s].get("boot_id") for s in expected if s in proofs}) == 2
+                          and all(any(r["serial"] == s and r.get("evidence_digest") == proofs[s].get("evidence_digest") for r in report["disks"]) for s in expected))
+                config_ready = report["configuration_ready"] and not report["warnings"]
+                plan["state"] = "COMPLETED" if config_ready and tested else "BOOT_TEST_REQUIRED" if config_ready else "BOOT_REVIEW_REQUIRED"
+                plan["boot_test"] = "VERIFICATO_DALL_OPERATORE" if tested else "NON_TESTATO_COMPLETAMENTE"
+                plan["result_message"] = ("ZFS e configurazione EFI verificati; prove di avvio autonomo registrate dall'operatore." if config_ready and tested else
+                    "Mirror ZFS ricostruito; configurazione EFI verificata, avvio autonomo NON TESTATO su entrambi i dischi." if config_ready else
+                    "Mirror ZFS ricostruito; configurazione boot da verificare. Non è un successo completo.")
+            else:
+                plan["state"] = "COMPLETED"
+            if plan["state"] == "COMPLETED":
+                plan["completed_at"] = utcnow()
+        elif plan["state"] != "WAITING_RESILVER":
+            plan["state"] = "MONITORING" if "in progress" in plan["scan"] else "ZFS_REVIEW_REQUIRED"
         save_record(plan)
     elif plan["state"] in {"RUNNING", "QUEUED"}:
         # A STARTED command after an unexpected reboot must never be replayed.
@@ -436,6 +561,50 @@ def get_status(identifier):
                     save_record(plan)
         except BlockingIOError:
             pass
+    return plan
+
+
+def record_boot_test(request):
+    record_path(request.get("id"))
+    with locked("status-" + request["id"]):
+        plan = _record_boot_test(request)
+    return get_status(plan["id"])
+
+
+def _record_boot_test(request):
+    with locked():
+        plan = load_record(request.get("id"))
+        if plan.get("role") not in {"BOOT", "MISTO"} or plan.get("action") == "offline" or plan["state"] in {"QUEUED", "RUNNING", "WAITING_RESILVER", "UNKNOWN", "FAILED"}:
+            raise SafetyError("Non è possibile registrare una prova in questa fase.")
+        if request.get("confirmed") is not True:
+            raise SafetyError("Conferma della prova fisica di avvio mancante.")
+        snapshot = collect()
+        if snapshot["host_id"] != plan["host_id"]:
+            raise SafetyError("Host diverso dal piano.")
+        pool = next((p for p in snapshot["pools"] if p["guid"] == plan["pool_guid"]), None)
+        if not pool or not snapshot["complete"]:
+            raise SafetyError("Pool o inventario non verificabile per la prova.")
+        present = [disk_for_member(snapshot, m) for m in leaves(pool)]
+        present = [d for d in present if d]
+        serial = request.get("serial")
+        expected = {plan["target"]["serial"], (plan.get("source") or {}).get("serial", "")}
+        if len(present) != 1 or present[0]["serial"] != serial or serial not in expected:
+            raise SafetyError("La prova richiede un solo disco del mirror fisicamente rilevato, con il seriale dichiarato.")
+        if (not snapshot.get("boot_id") or snapshot["boot_id"] == plan.get("boot_id_before")
+                or snapshot.get("boot_started_at", 0) <= plan["created_at"]):
+            raise SafetyError("Non risulta un nuovo avvio successivo al piano.")
+        report = boot_report(snapshot, pool)
+        if not any(r["serial"] == serial and r["configuration_ready"] for r in report["disks"]):
+            raise SafetyError("Configurazione EFI del solo disco presente non verificata.")
+        row = next(r for r in report["disks"] if r["serial"] == serial)
+        nvram = snapshot.get("boot", {}).get("nvram", {})
+        if nvram.get("code") != 0 or not nvram.get("current") or nvram["current"] not in row["nvram_entry_ids"]:
+            raise SafetyError("BootCurrent non conferma l'avvio dalla ESP del disco dichiarato; nessuna certificazione automatica della fonte di avvio.")
+        proofs = plan.setdefault("autonomous_tests", {})
+        if any(s != serial and p["boot_id"] == snapshot["boot_id"] for s, p in proofs.items()):
+            raise SafetyError("Non si possono certificare due dischi nello stesso avvio.")
+        proofs[serial] = {"state": "VERIFIED_BY_OPERATOR", "boot_id": snapshot["boot_id"], "at": utcnow(), "evidence_digest": row["evidence_digest"]}
+        save_record(plan)
     return plan
 
 
@@ -500,7 +669,7 @@ def shutdown(request):
     if any(g.get("node") == snapshot["hostname"] and g.get("status") == "running" for g in rows):
         raise SafetyError("VM o container ancora accesi: arrestarli da Proxmox prima di spegnere il nodo.")
     with locked():
-        if any(json.loads(p.read_text()).get("state") in {"QUEUED", "RUNNING", "UNKNOWN"} for p in state_dir().glob("*.json")):
+        if any(json.loads(p.read_text()).get("state") in {"QUEUED", "RUNNING", "WAITING_RESILVER", "MONITORING", "UNKNOWN"} for p in state_dir().glob("*.json")):
             raise SafetyError("Intervento in coda, attivo o con esito ignoto: spegnimento non consentito dall'app.")
         result = run(["shutdown", "-h", "+1"])
         if result["code"]:
@@ -513,6 +682,8 @@ def dispatch(request):
     operation = request.get("op")
     if operation == "collect":
         return collect()
+    if operation == "version":
+        return {"version": __version__, "schema": 2}
     if operation == "plan":
         return prepare(request["request"])
     if operation == "submit":
@@ -526,10 +697,21 @@ def dispatch(request):
         return identify(request)
     if operation == "shutdown":
         return shutdown(request)
+    if operation == "record_boot_test":
+        return record_boot_test(request)
     raise SafetyError("Operazione non consentita.")
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--inspect-esp":
+        try:
+            if os.geteuid() != 0:
+                raise SafetyError("Ispezione ESP richiede root.")
+            print(json.dumps({"ok": True, "result": inspect_esp_namespace(sys.argv[2], run)}))
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+            sys.exit(1)
+        return
     if len(sys.argv) == 3 and sys.argv[1] in {"--run", "--led"}:
         state_dir()
         (perform_job if sys.argv[1] == "--run" else led_worker)(sys.argv[2])

@@ -230,6 +230,7 @@ def classify(snapshot):
 
 def safety_fingerprint(snapshot):
     return digest({"host": snapshot.get("host_id"), "root": snapshot.get("root"),
+                   "boot_id": snapshot.get("boot_id"),
                    "pools": snapshot.get("pools"),
                    "disks": [{k: v for k, v in d.items() if k not in {"smart", "temperature"}}
                              for d in snapshot.get("disks", [])],
@@ -247,6 +248,8 @@ def plan_replacement(snapshot, request):
     """Return an executable, server-derived plan or explicit blocking reasons."""
     if request.get("action") == "offline":
         return plan_offline(snapshot, request)
+    if request.get("action") == "repair_boot":
+        return plan_boot_repair(snapshot, request)
     blocks, warnings, steps = [], [], []
     pool = next((p for p in snapshot["pools"] if p["guid"] == str(request.get("pool_guid"))), None)
     if pool is None:
@@ -335,9 +338,18 @@ def plan_replacement(snapshot, request):
     new_member = target["by_id"]
     source = None
     if boot:
+        from .boot import boot_report
+        report = boot_report(snapshot, pool)
+        if snapshot.get("boot", {}).get("firmware_mode") != "UEFI":
+            blocks.append("Modalità firmware non verificata come UEFI; BIOS Legacy richiede una procedura distinta.")
+        if snapshot.get("boot", {}).get("architecture") not in {"x86_64", "amd64"}:
+            blocks.append("Architettura boot x86_64 non verificata.")
         if kind != "mirror" or snapshot.get("root", {}).get("fstype") != "zfs" or snapshot["root"].get("source", "").split("/")[0] != pool["name"]:
             blocks.append("Boot supportato solo su root ZFS in mirror di due membri.")
         source = disk_for(snapshot, survivors[0]["name"]) if survivors else None
+        source_report = next((r for r in report["disks"] if source and r["by_id"] == source.get("by_id")), None)
+        if not source_report or not source_report["configuration_ready"]:
+            blocks.append("Il membro di riferimento non ha una configurazione EFI verificata. Diagnosticare e ripristinare separatamente la sua ESP prima della sostituzione.")
         part = partition_for(source, survivors[0]["name"]) if source else None
         esps = [p for p in source.get("partitions", []) if p.get("parttype", "").lower() == ESP] if source else []
         table = source.get("table", {}) if source else {}
@@ -388,6 +400,7 @@ def plan_replacement(snapshot, request):
         mode = next(iter(modes))
         add(["proxmox-boot-tool", "init", esp_path] + (["grub"] if mode == "grub" else []),
             "Inizializza il bootloader nella modalità rilevata sul membro sano.", "boot")
+        add(["proxmox-boot-tool", "refresh"], "Sincronizza tutte le ESP registrate dopo il resilver; non modifica partizioni ZFS.", "boot_refresh")
         add(["proxmox-boot-tool", "status"], "Verifica le ESP; un test di avvio separato resta necessario.", "verify")
     needed = {step["argv"][0] for step in steps}
     missing = needed - set(snapshot.get("tools", []))
@@ -398,8 +411,87 @@ def plan_replacement(snapshot, request):
             "raid": raid_label(pool), "old_guid": old["guid"], "old_name": old["name"],
             "target": deepcopy(target), "source": deepcopy(source), "new_member": new_member,
             "fingerprint": safety_fingerprint(snapshot), "topology_fingerprint": topology_fingerprint(pool), "steps": steps,
+            "boot_id_before": snapshot.get("boot_id", ""),
+            "boot_before": report if boot else None,
             "blocks": list(dict.fromkeys(blocks)), "warnings": warnings,
             "guests": pool.get("guests", [])}
+
+
+def plan_boot_repair(snapshot, request):
+    """Repair only the selected ESP; never recreate a healthy ZFS mirror."""
+    from .boot import boot_report
+    blocks, steps = [], []
+    pool = next((p for p in snapshot["pools"] if p["guid"] == str(request.get("pool_guid"))), None)
+    if not pool:
+        raise SafetyError("Pool di boot non identificato.")
+    target = next((d for d in snapshot["disks"] if d.get("by_id") == request.get("target")), None)
+    member = next((m for m in leaves(pool) if disk_for_member(snapshot, m) == target), None) if target else None
+    if not target or not member:
+        raise SafetyError("Disco selezionato non associato a un membro del pool di boot.")
+    report = boot_report(snapshot, pool)
+    row = next((r for r in report["disks"] if r["by_id"] == target["by_id"]), {})
+    peers = [r for r in report["disks"] if r["by_id"] != target["by_id"]]
+    source_row = next((r for r in peers if r["configuration_ready"]), None)
+    source = next((d for d in snapshot["disks"] if source_row and d.get("by_id") == source_row["by_id"]), None)
+    groups = data_groups(pool)
+    if not (len(groups) == 1 and groups[0]["kind"] == "mirror" and len(leaves(groups[0])) == 2
+            and len(pool["children"]) == 1 and pool.get("role") in {"BOOT", "MISTO"}
+            and snapshot.get("root", {}).get("fstype") == "zfs"
+            and snapshot["root"].get("source", "").split("/")[0] == pool["name"]):
+        blocks.append("Ripristino EFI supportato solo sul mirror root ZFS di due membri senza vdev ausiliari.")
+    if not snapshot.get("complete") or snapshot.get("issues") or pool.get("warnings"):
+        blocks.append("Inventario o topologia incompleti.")
+    if not re.match(r"^pve-manager/(8|9)\.", snapshot.get("pve_version", "")):
+        blocks.append("Versione Proxmox non supportata.")
+    if snapshot.get("demo"):
+        blocks.append("Modalità dimostrativa: nessuna modifica reale.")
+    if snapshot.get("boot", {}).get("firmware_mode") != "UEFI" or snapshot.get("boot", {}).get("architecture") not in {"x86_64", "amd64"}:
+        blocks.append("Ripristino EFI disponibile solo con UEFI x86_64 verificato, non BIOS Legacy.")
+    if (pool["state"] not in GOOD or pool["errors"] != "No known data errors" or "in progress" in pool["scan"]
+            or any(m["state"] not in GOOD or len(m["errors"]) != 3 or any(m["errors"]) for m in leaves(pool))):
+        blocks.append("Prima del ripristino EFI il mirror ZFS deve essere ONLINE, senza errori o resilver attivo.")
+    if not source or not source_row:
+        blocks.append("Nessun altro membro con configurazione EFI verificata: richiede diagnosi manuale.")
+    if (not target.get("identity_verified") or not target.get("serial") or target.get("ro")
+            or sum(d.get("serial") == target.get("serial") for d in snapshot["disks"]) != 1):
+        blocks.append("Identità o accessibilità del disco selezionato non verificata.")
+    esp = row.get("esp")
+    if not esp or target.get("table", {}).get("label") != "gpt" or not esp.get("partuuid"):
+        blocks.append("ESP GPT del disco selezionato non identificata in modo univoco.")
+    mode = source_row["mode"] if source_row else "unknown"
+    if row.get("mode") not in {"unknown", mode}:
+        blocks.append("Bootloader diversi fra i membri: non viene eseguita una migrazione implicita.")
+    if snapshot.get("boot", {}).get("secure_boot") is True and mode != "grub":
+        blocks.append("Secure Boot attivo: systemd-boot non viene inizializzato automaticamente.")
+    path = target["by_id"] + "-part" + str(esp["number"]) if esp else ""
+    info = snapshot.get("boot", {}).get("esps", {}).get(esp["path"], {}) if esp else {}
+    needs_format = info.get("probe_code") == 2 and info.get("signatures") == []
+    if esp and (esp.get("mounts") or any(m.get("source") in [esp["path"], *esp.get("aliases", [])] for m in snapshot.get("mounts", []))):
+        blocks.append("ESP selezionata montata: nessuno smontaggio o ripristino automatico.")
+    if not needs_format and (info.get("probe", {}).get("TYPE") != "vfat"
+                             or info.get("probe", {}).get("VERSION", "").upper() != "FAT32" or info.get("fsck_code") != 0):
+        blocks.append("ESP non vuota oppure FAT32 non coerente: nessuna formattazione o riparazione forzata.")
+
+    def add(argv, message, phase="boot"):
+        steps.append({"argv": argv, "command": command_text(argv), "explanation": message, "phase": phase})
+    if needs_format and path:
+        add(["proxmox-boot-tool", "format", path], "Formatta SOLO l'ESP priva di firme del disco selezionato; non tocca GPT né ZFS.")
+    if mode != "unknown" and path:
+        add(["proxmox-boot-tool", "init", path] + (["grub"] if mode == "grub" else []), "Ripristina il bootloader sulla sola ESP selezionata.")
+        add(["proxmox-boot-tool", "refresh"], "Sincronizza kernel e configurazioni su tutte le ESP già registrate.", "boot_refresh")
+        add(["proxmox-boot-tool", "status"], "Rilegge il registro; i file e le vie UEFI saranno controllati separatamente.", "verify")
+    missing = {s["argv"][0] for s in steps} - set(snapshot.get("tools", []))
+    if missing or not steps:
+        blocks.append("Strumenti o modalità di ripristino mancanti: " + ", ".join(sorted(missing)))
+    return {"action": "repair_boot", "request": deepcopy(request), "host_id": snapshot.get("host_id"),
+        "pool": pool["name"], "pool_guid": pool["guid"], "role": pool["role"], "raid": raid_label(pool),
+        "old_guid": member["guid"], "old_name": member["name"], "target": deepcopy(target), "source": deepcopy(source),
+        "new_member": member["name"], "expected_esp": deepcopy(esp), "boot_before": report,
+        "boot_id_before": snapshot.get("boot_id", ""), "fingerprint": safety_fingerprint(snapshot),
+        "topology_fingerprint": topology_fingerprint(pool), "steps": steps, "blocks": blocks,
+        "warnings": ["Ripristino della sola ESP: nessun sgdisk, zpool replace o grub-install generico.",
+                     "La prova di avvio autonomo richiede una manutenzione e non è dedotta dai file EFI."],
+        "guests": pool.get("guests", [])}
 
 
 def plan_offline(snapshot, request):

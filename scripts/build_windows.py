@@ -28,7 +28,7 @@ def main():
                                           str(Path(sys.executable).parent), str(Path(sys.base_prefix))])
     subprocess.run(command, cwd=ROOT, env=build_env, check=True)
     destination = ROOT / "dist/ProxmoxZfsAssistant"
-    for file in ("LICENSE", "README.md", "PROGETTO.md", "THIRD_PARTY_NOTICES.md"):
+    for file in ("LICENSE", "README.md", "PROGETTO.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md"):
         shutil.copy2(ROOT / file, destination / file)
     shutil.copytree(ROOT / "docs", destination / "docs", dirs_exist_ok=True)
     licenses = destination / "licenses"

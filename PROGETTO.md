@@ -1,11 +1,11 @@
 # Assistente desktop per la diagnosi e la sostituzione dei dischi ZFS in Proxmox
 
-Documento di progetto — versione 0.5 — 1 novembre 2026  
+Documento di progetto — versione 0.6 — 2 novembre 2026<br>
 Referente: Rudi Gomirato  
 Nome provvisorio del repository: `proxmox-zfs-assistant`  
 Destinazione prevista: account GitHub [Rudi-Gomirato](https://github.com/Rudi-Gomirato).
 
-**Stato di implementazione:** disponibile la prima versione 0.1.0 della GUI Windows, del motore e dell'helper SSH. Sono presenti demo, test automatici, procedure per mirror e RAIDZ e script di build. Il codice non è stato collegato a un host Proxmox reale durante questo sviluppo: compatibilità hardware, boot e LED restano da collaudare. Il presente documento conserva il disegno complessivo; per il comportamento effettivo e le limitazioni della prima versione fanno riferimento [manuale](docs/manuale.md) e [matrice di compatibilità](docs/compatibilita.md). La licenza MIT è stata confermata dal committente.
+**Stato di implementazione:** disponibile la versione 0.2.0 della GUI Windows, del motore e dell'helper SSH. Sono presenti demo, test automatici, procedure per mirror e RAIDZ e script di build. L'aggiornamento aggiunge diagnosi EFI indipendente per entrambi i membri, ripristino della sola ESP selezionata, attesa del resilver prima dei passi EFI e registrazione delle prove fisiche di avvio. Il codice non è stato collegato a un host Proxmox reale durante questo sviluppo: compatibilità hardware, boot e LED restano da collaudare. Il presente documento conserva il disegno complessivo; per il comportamento effettivo e le limitazioni fanno riferimento [manuale](docs/manuale.md), [matrice di compatibilità](docs/compatibilita.md) e [changelog](CHANGELOG.md). La licenza MIT è stata confermata dal committente.
 
 ## 1 Obiettivo e decisioni iniziali
 

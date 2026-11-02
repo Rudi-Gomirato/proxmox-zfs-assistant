@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import paramiko
+from . import __version__
 
 REMOTE = "/usr/local/lib/pve-disk-assistant/helper.pyz"
 RPC = "LC_ALL=C /usr/bin/python3 " + REMOTE
@@ -48,8 +49,8 @@ def helper_archive():
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         files = {"__main__.py": "from pve_disk_assistant.node import main\nmain()\n",
-                 "pve_disk_assistant/__init__.py": ""}
-        for filename in ("core.py", "node.py"):
+                 "pve_disk_assistant/__init__.py": (base / "__init__.py").read_text(encoding="utf-8")}
+        for filename in ("core.py", "node.py", "boot.py"):
             files["pve_disk_assistant/" + filename] = (base / filename).read_text(encoding="utf-8")
         for name, contents in files.items():
             info = zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0))
@@ -144,7 +145,15 @@ class SSHBackend:
             client.close()
 
     def rpc(self, request):
-        return self._call(("sudo -n " if self.connection.sudo else "") + RPC, request)
+        command = ("sudo -n " if self.connection.sudo else "") + RPC
+        if request.get("op") not in {"collect", "version"}:
+            try:
+                version = self._call(command, {"op": "version"})
+            except RuntimeError as exc:
+                raise RuntimeError("Aggiorna l'helper dalla scheda Connessione prima di usare piani e interventi della versione " + __version__ + ".") from exc
+            if version.get("version") != __version__ or version.get("schema") != 2:
+                raise RuntimeError("Versione helper incompatibile. Installa / aggiorna helper sul nodo, poi ripeti l'analisi.")
+        return self._call(command, request)
 
     def install(self):
         if self.connection.sudo:

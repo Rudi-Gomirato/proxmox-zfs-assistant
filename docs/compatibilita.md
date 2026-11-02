@@ -1,6 +1,6 @@
 # Compatibilità e stato del collaudo
 
-Versione iniziale 0.1.0, 1 novembre 2026. Il codice è implementato e sottoposto a test automatici e verifica della GUI su Windows. Non è stato collegato a un server Proxmox reale durante lo sviluppo di questa versione.
+Versione 0.2.0, 2 novembre 2026. Il codice è implementato e sottoposto a test automatici e verifica della GUI su Windows. Non è stato collegato a un server Proxmox reale durante lo sviluppo di questa versione. Le regressioni del caso EFI usano esclusivamente dati sintetici; non attribuiscono una causa al guasto segnalato.
 
 | Configurazione | Diagnostica implementata | Esecuzione implementata | Verifica effettuata |
 | --- | --- | --- | --- |
@@ -9,7 +9,10 @@ Versione iniziale 0.1.0, 1 novembre 2026. Il codice è implementato e sottoposto
 | VM mirror di due dischi interi | Sì | Replace senza forzatura | Test su dati sintetici |
 | VM GPT ZFS con eventuale partizione riservata | Sì | Replica GPT e replace della partizione | Test su dati sintetici |
 | VM RAIDZ1 o RAIDZ2 di tre membri | Sì | Replace del membro nel gruppo esistente | Test su dati sintetici; serve banco aggiuntivo |
-| Boot ZFS mirror di due SSD con ESP | Sì | GPT, replace, format e init ESP | Test su dati sintetici per GRUB e systemd-boot |
+| Boot ZFS mirror di due SSD con ESP UEFI x64 | Diagnosi di entrambi i membri | GPT, replace, attesa resilver, ESP, init e refresh | Test sintetici per GRUB e systemd-boot; collaudo fisico necessario |
+| Mirror ONLINE con una ESP assente o incompleta | Controlli separati ZFS/EFI | Piano sulla sola ESP selezionata, con riferimento sano | Regressioni sintetiche; nessun replace su pool sano |
+| Avvio autonomo di ciascun membro | Configurazione e BootCurrent | Registrazione operatore dopo due avvii fisici distinti | Test del flusso con fixture, prove hardware necessarie |
+| Secure Boot | Stato rilevato quando disponibile | Nessuna certificazione firme; systemd-boot bloccato se attivo | Catena firmata e firmware da verificare manualmente |
 | GRUB legacy o layout boot personalizzato | Rilevamento parziale | Bloccata | Procedura manuale dedicata |
 | RAIDZ3, mirror più ampi, più vdev | Rilevamento topologico | Bloccata | Non nel perimetro esecutivo iniziale |
 | Log, cache, special, spare attivi, dRAID | Rilevamento conservativo | Bloccata | Non nel perimetro esecutivo iniziale |
@@ -25,3 +28,5 @@ La capacità del ricambio viene confrontata conservativamente con il più grande
 La topologia e le firme sono ricontrollate sul nodo prima dell'esecuzione. Questo non equivale a una certificazione dell'hardware né a una garanzia contro altri amministratori che modifichino il server durante una manutenzione: concordare sempre la finestra di intervento.
 
 Il collaudo fisico deve registrare release Proxmox, OpenZFS, kernel, metodo di boot, Secure Boot, modello server/scheda madre, cablaggio o backplane, strumenti installati e sequenza degli esiti. Per RAIDZ il PC con due dischi VM non basta: iniziare con tre dischi virtuali sacrificabili, poi hardware rappresentativo con dati di prova. Nessun guasto indotto su VM operative.
+
+Per il boot provare sia sostituzione sia ripristino della sola ESP con GRUB e systemd-boot, controllare che la destinazione sia sempre distinta dal membro ZFS e che i passi EFI attendano il resilver. Verificare interruzioni SSH, UUID obsoleti, file mancanti e differenze firmware. Le due prove di boot richiedono risincronizzazione con entrambi i membri fra una prova e l'altra, come indicato nel manuale. Non è ancora certificata la portabilità della diagnostica con ESP già montate o con percorsi firmware proprietari.

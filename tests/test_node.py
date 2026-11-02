@@ -203,7 +203,7 @@ def test_monitor_requires_the_new_member_and_clean_pool(sandbox, monkeypatch):
     plan["state"] = "MONITORING"
     node.save_record(plan)
     before = node.get_status(plan["id"])
-    assert before["state"] == "MONITORING"
+    assert before["state"] == "ZFS_REVIEW_REQUIRED"
     rebuilt = inventory()
     pool = rebuilt["pools"][1]
     pool["state"] = pool["children"][0]["state"] = "ONLINE"
