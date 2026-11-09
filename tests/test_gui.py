@@ -14,7 +14,17 @@ from copy import deepcopy
 def app():
     application = QApplication.instance() or QApplication([])
     application.setStyleSheet(STYLE)
-    return application
+    yield application
+    # Destroy C++ widgets while Python callbacks and QApplication still exist,
+    # instead of leaving their reference cycles to interpreter finalization.
+    import gc
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+    for widget in application.topLevelWidgets():
+        if shiboken6.isValid(widget):
+            shiboken6.delete(widget)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    gc.collect()
 
 
 def test_gui_renders_both_topologies_and_preserves_approval_boundary(app, tmp_path):

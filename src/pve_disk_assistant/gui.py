@@ -87,6 +87,7 @@ class Window(QMainWindow):
     def __init__(self, directory, demo=True):
         super().__init__()
         self.setWindowTitle("Proxmox ZFS Assistant")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.resize(1380, 940)
         self.store = Store(directory)
         self.backend = DemoBackend() if demo else None
@@ -1067,6 +1068,8 @@ class Window(QMainWindow):
             QMessageBox.information(self, "Operazione in corso", "Attendi l'esito della richiesta SSH prima di chiudere questa finestra. Le operazioni già inviate continuano sul nodo.")
             event.ignore()
         else:
+            self.poll.stop()
+            self.age_timer.stop()
             event.accept()
 
 

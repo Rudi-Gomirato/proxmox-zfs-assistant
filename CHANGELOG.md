@@ -2,6 +2,8 @@
 
 ## 0.3.0 — 9 novembre 2026
 
+- Chiusura esplicita delle finestre Qt e dei timer; teardown dei test prima della finalizzazione Python, per evitare l'arresto nativo rilevato in CI Linux dopo i test.
+
 - Corretto il cambio automatico del pool: selezioni stabili, nessun fallback, nessun cambio da richieste di chiarimento RAID; controlli del target congelati durante le richieste SSH.
 - Ignorati snapshot precedenti; piani conservati se il fingerprint di sicurezza è invariato, con ordine degli elementi normalizzato. Cambiamenti reali richiedono nuova approvazione.
 - Distinte entry GRUB/ZFS e systemd-boot, con percorsi verificati e risultati ERROR/UNKNOWN. Nessuna esecuzione degli script di configurazione durante la diagnosi.
