@@ -148,7 +148,8 @@ def test_new_data_after_preview_blocks_submission(replacement, monkeypatch):
         node.submit({**approval(plan), "format_partuuid_confirmation": plan["expected_esp"]["partuuid"]})
 
 
-def test_complete_guided_initialization_and_no_format_replay(replacement, monkeypatch):
+@pytest.mark.parametrize("stale_uuid", [False, True])
+def test_complete_guided_initialization_and_no_format_replay(replacement, monkeypatch, stale_uuid):
     parent, snapshot, target, part = replacement
     plan = node.prepare(request())
     node.submit({**approval(plan), "format_partuuid_confirmation": part["partuuid"]})
@@ -162,10 +163,21 @@ def test_complete_guided_initialization_and_no_format_replay(replacement, monkey
             # The real collector verifies FAT32/UUID/fsck before init.
             snapshot["disks"] = deepcopy(healthy["disks"])
             snapshot["boot"] = deepcopy(healthy["boot"])
+        if argv[:2] == ["proxmox-boot-tool", "status"] and stale_uuid:
+            snapshot["boot"].update(code=2, missing_uuids=["DEAD-0000"])
+            return {"code": 2, "out": "WARN: missing ESP DEAD-0000", "err": ""}
         return {"code": 0, "out": "", "err": ""}
     monkeypatch.setattr(node, "run", run)
     node.perform_job(plan["id"])
     finished = node.get_status(plan["id"])
+    if stale_uuid:
+        assert finished["state"] == "BOOT_REVIEW_REQUIRED"
+        assert finished["registry_cleanup"]["missing_uuids"] == ["DEAD-0000"]
+        assert finished["events"][-1]["state"] == "FAILED"
+        # Simulate the separate approved cleanup, then revalidate the same
+        # initialization record without executing its format/init again.
+        snapshot["boot"].update(code=0, missing_uuids=[])
+        finished = node.get_status(plan["id"])
     assert finished["state"] == "BOOT_TEST_PENDING", finished.get("error")
     assert finished["formatted_uuid"] == "CCCC-1111"
     assert [c[1] for c in commands] == ["format", "init", "refresh", "status"]

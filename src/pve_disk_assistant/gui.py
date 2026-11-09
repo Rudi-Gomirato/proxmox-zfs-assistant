@@ -1021,6 +1021,8 @@ class Window(QMainWindow):
         body = f"<h2>{e(job.get('pool', 'Intervento'))} · {e(job['state'])}</h2><p>ID {e(job['id'])}</p>"
         if job.get("error"):
             body += "<p style='color:#f18c99'>" + e(job["error"]) + "</p>"
+        if job.get('verification_error'):
+            body += "<p style='color:#f4bf65'>" + e(job['verification_error']) + "</p>"
         if job.get("result_message"):
             body += "<p><b>" + e(job["result_message"]) + "</b></p>"
         if job.get("zfs_state"):

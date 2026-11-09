@@ -553,7 +553,14 @@ def perform_job(identifier):
                         result = run(step["argv"], timeout=120)
                         event.update({"finished_at": utcnow(), "state": "OK" if result["code"] == 0 else "FAILED", **result})
                         save_record(plan)
-                        if result["code"]:
+                        diagnostic_failure = (result["code"] and step["phase"] == "verify"
+                                              and step["argv"] == ["proxmox-boot-tool", "status"])
+                        if diagnostic_failure:
+                            # Writes have finished. Keep the nonzero status in
+                            # the audit, but allow read-only revalidation after
+                            # the separately approved missing-UUID cleanup.
+                            plan["verification_error"] = "proxmox-boot-tool status non riuscito: verificare diagnostica EFI e UUID assenti."
+                        elif result["code"]:
                             raise SafetyError("Comando fallito. Non ripetere automaticamente: " + step["command"])
                         plan["next_step"] = index + 1
                         if step["phase"] == "replace" and plan["role"] in {"BOOT", "MISTO"}:
@@ -570,7 +577,7 @@ def perform_job(identifier):
                             raise SafetyError("Stato dopo offline non confermato: verificare prima della rimozione.")
                         plan["state"] = "READY_FOR_REMOVAL"
                     else:
-                        plan["state"] = "MONITORING"
+                        plan["state"] = "BOOT_REVIEW_REQUIRED" if plan.get("verification_error") else "MONITORING"
                     plan["boot_test"] = "NON_TESTATO" if plan.get("action") != "offline" and plan["role"] in {"BOOT", "MISTO"} else "NON_APPLICABILE"
                 except Exception as exc:
                     plan["state"] = "UNKNOWN" if plan["events"] and plan["events"][-1]["state"] == "STARTED" else "FAILED"
@@ -633,7 +640,9 @@ def _get_status(identifier):
                 tested = ("" not in expected and len(expected) == 2 and all(proofs.get(s, {}).get("state") == "VERIFIED_BY_OPERATOR" for s in expected)
                           and len({proofs[s].get("boot_id") for s in expected if s in proofs}) == 2
                           and all(any(r["serial"] == s and r.get("evidence_digest") == proofs[s].get("evidence_digest") for r in report["disks"]) for s in expected))
-                config_ready = report["configuration_ready"] and not report["warnings"]
+                config_ready = report["configuration_ready"] and not report["warnings"] and snapshot.get("boot", {}).get("code", 0) == 0
+                if snapshot.get("boot", {}).get("code", 0) == 0:
+                    plan.pop("verification_error", None)
                 plan["registry_cleanup"] = {"state": "REQUIRED" if snapshot.get("boot", {}).get("missing_uuids") else "OK",
                                             "missing_uuids": snapshot.get("boot", {}).get("missing_uuids", [])}
                 if plan["registry_cleanup"]["state"] == "REQUIRED":

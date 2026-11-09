@@ -6,6 +6,7 @@
 - Nuovo piano da Avvio EFI o dall'intervento ZFS: prova di provenienza nel registro root del nodo, WWN/seriale/PARTUUID, resilver concluso, distinzione ESP/ZFS, verifica firme e lettura integrale di tutti i byte.
 - Riconosciuto il risultato blkid con soli metadati GPT; dati non nulli o esiti incerti mantengono il blocco. Conferma esplicita di format vincolata al PARTUUID, oltre al seriale.
 - FAT32 e UUID verificati prima di init, GRUB mantenuto quando rilevato sul riferimento, refresh esplicito e diagnostica finale. Pulizia vecchi UUID separata e BOOT_TEST_PENDING fino alle prove fisiche.
+- Se il comando diagnostico status termina con errore dopo le scritture, conserva il codice nel registro e mantiene BOOT_REVIEW_REQUIRED: dopo la pulizia separata è possibile rivalutare lo stesso intervento senza ripetere format/init. I comandi modificativi falliti non vengono ritentati.
 - Registro padre/figlio per recuperare la fase EFI senza ripetere GPT/replace, controlli ripetuti prima delle scritture e nessun replay dopo errori.
 - Nuove regressioni sintetiche e guida [nuova ESP](docs/nuova-esp.md); collaudo su hardware reale ancora necessario.
 
