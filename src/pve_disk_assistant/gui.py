@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontDatabase
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QTextDocument
+from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
     QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QPlainTextEdit,
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
 
 from . import __version__
 from .boot import boot_report
-from .core import (BAD, GOOD, anonymize, data_groups, disk_for, disk_for_member, leaves,
+from .core import (BAD, GOOD, anonymize, safety_fingerprint, data_groups, disk_for, disk_for_member, leaves,
                    raid_label, command_text)
 from .demo import DemoBackend
 from .store import Store
@@ -315,6 +316,19 @@ class Window(QMainWindow):
         form.addRow("Chiave privata", key_row)
         form.addRow("Password / passphrase chiave", self.password)
         form.addRow(self.sudo)
+        self.read_only = QCheckBox('Sola lettura e anteprima: nessuna esecuzione')
+        self.read_only.setChecked(saved.get('read_only', False))
+        form.addRow(self.read_only)
+        retention = QSpinBox()
+        retention.setRange(10, 10000)
+        retention.setValue(self.store.get('retention', 100))
+        retention.valueChanged.connect(lambda value: self.store.set('retention', value))
+        form.addRow('Snapshot da conservare', retention)
+        self.server_profiles = QComboBox()
+        self.server_profiles.addItems(sorted(self.store.get('profiles', {})))
+        form.addRow('Profilo cliente / nodo / ambiente', self.server_profiles)
+        self.button('Salva profilo', self.save_profile, outer, network=False)
+        self.button('Carica profilo', self.load_profile, outer, network=False)
         outer.addWidget(group)
         buttons = QHBoxLayout()
         self.button("Collega e analizza", self.connect_live, buttons, "primary")
@@ -341,7 +355,8 @@ class Window(QMainWindow):
         layout.addWidget(text)
         actions = QHBoxLayout()
         self.button("Aggiorna diagnostica EFI", self.scan, actions, "primary")
-        self.button("Piano ripristino della sola ESP selezionata", self.preview_boot_repair, actions)
+        self.button("Piano ripristino della sola ESP selezionata", lambda: self.preview_boot_repair(), actions)
+        self.button('Piano pulizia UUID assenti', lambda: self.preview_boot_repair(action='clean_boot'), actions)
         actions.addStretch()
         layout.addLayout(actions)
         self.boot_table = QTableWidget(0, 8)
@@ -405,7 +420,7 @@ class Window(QMainWindow):
         body += "<p><b>Avvio autonomo: NON TESTATO.</b> Configurazione e file non provano che il firmware avvierà il disco. Secure Boot: firme non certificate dall'app.</p>"
         self.boot_detail.setHtml(body)
 
-    def preview_boot_repair(self):
+    def preview_boot_repair(self, action='repair_boot'):
         index = self.boot_table.currentRow()
         if index < 0 or index >= len(self.boot_rows):
             return
@@ -415,7 +430,7 @@ class Window(QMainWindow):
             return
         self.invalidate_plan()
         self.pool_combo.setCurrentIndex(self.pool_combo.findData(row["pool"]["guid"]))
-        request = {"action": "repair_boot", "pool_guid": row["pool"]["guid"], "target": row["disk"]["by_id"]}
+        request = {"action": action, "pool_guid": row["pool"]["guid"], "target": row["disk"]["by_id"]}
         def show(plan):
             self.tabs.setCurrentIndex(2)
             self.render_plan(plan)
@@ -425,12 +440,16 @@ class Window(QMainWindow):
         if self.busy:
             return
         self.busy = True
+        controls = [self.tree, self.pool_combo, self.old_combo, self.target_combo, self.profile, self.hot_swap, self.server_profiles]
+        for control in controls:
+            control.setEnabled(False)
+        backend = self.backend
         for button in self.network_buttons:
             button.setEnabled(False)
         self.statusBar().showMessage(label)
         worker = Worker(function, self)
         self.worker = worker
-        worker.result.connect(callback)
+        worker.result.connect(lambda result: callback(result) if self.backend is backend else None)
 
         def failed(error):
             if isinstance(error, HostVerificationRequired) and isinstance(self.backend, SSHBackend):
@@ -449,9 +468,11 @@ class Window(QMainWindow):
 
         def finished():
             self.busy = False
+            for control in controls:
+                control.setEnabled(True)
             for button in self.network_buttons:
                 button.setEnabled(True)
-            self.execute_button.setEnabled(bool(self.plan and not self.plan["blocks"] and not self.is_demo()))
+            self.execute_button.setEnabled(bool(self.plan and not self.plan.get('read_only') and not self.plan["blocks"] and not self.is_demo()))
             worker.deleteLater()
             self.worker = None
 
@@ -468,14 +489,41 @@ class Window(QMainWindow):
             return None
         config = {"host": self.host.text().strip(), "port": self.port.value(),
                   "username": self.username.text().strip(), "key_file": self.key_file.text().strip(),
-                  "sudo": self.sudo.isChecked()}
+                  "sudo": self.sudo.isChecked(), 'read_only': self.read_only.isChecked()}
         self.store.set("connection", config)
         return SSHBackend(Connection(**config, password=self.password.text()), self.store.directory / "known_hosts")
+
+    def save_profile(self):
+        name, ok = QInputDialog.getText(self, 'Profilo', 'Cliente / nodo / ambiente:')
+        if ok and name.strip() and self.connection_from_form():
+            profiles = self.store.get('profiles', {})
+            profiles[name.strip()] = self.store.get('connection')
+            self.store.set('profiles', profiles)
+            self.server_profiles.clear()
+            self.server_profiles.addItems(sorted(profiles))
+            self.server_profiles.setCurrentText(name.strip())
+
+    def load_profile(self):
+        if self.busy:
+            return
+        config = self.store.get('profiles', {}).get(self.server_profiles.currentText())
+        if not config:
+            return
+        for widget, key in ((self.host, 'host'), (self.username, 'username'), (self.key_file, 'key_file')):
+            widget.setText(config.get(key, ''))
+        self.port.setValue(config.get('port', 22))
+        self.sudo.setChecked(config.get('sudo', False))
+        self.read_only.setChecked(config.get('read_only', False))
+        self.password.clear()
+        self.backend = None
+        self.snapshot = None
+        self.invalidate_plan()
+        self.badge.setText('Profilo caricato: premi Collega e analizza')
 
     def connect_live(self):
         backend = self.connection_from_form()
         if backend:
-            self.backend, self.snapshot = backend, None
+            self.backend, self.snapshot, self.jobs = backend, None, []
             self.invalidate_plan()
             self.badge.setText("SSH · " + backend.connection.host)
             self.scan()
@@ -490,7 +538,7 @@ class Window(QMainWindow):
         if QMessageBox.question(self, "Installazione helper", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                 QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
             return
-        self.backend, self.snapshot = backend, None
+        self.backend, self.snapshot, self.jobs = backend, None, []
         self.invalidate_plan()
         self.asynchronous(backend.install, lambda r: QMessageBox.information(self, "Helper installato",
             "Helper installato. Ora premi Collega e analizza.\nSHA256: " + r["sha256"]), "Installazione helper…")
@@ -513,6 +561,66 @@ class Window(QMainWindow):
         self.asynchronous(lambda: self.backend.rpc({"op": "collect"}), self.render_snapshot, "Lettura del nodo e analisi ZFS…")
 
     def render_snapshot(self, snapshot):
+        previous = self.snapshot
+        if previous and previous['host_id'] == snapshot['host_id'] and snapshot['collected_at'] < previous['collected_at']:
+            return
+        combos = [self.pool_combo, self.old_combo, self.target_combo]
+        choices = [c.currentData() for c in combos]
+        selected = self.tree.currentItem()
+        tree_key = selected.data(0, Qt.ItemDataRole.UserRole) if selected else None
+        disk = self.snapshot['disks'][self.disk_table.currentRow()].get('by_id') if self.snapshot and 0 <= self.disk_table.currentRow() < len(self.snapshot['disks']) else None
+        boot_key = self.boot_rows[self.boot_table.currentRow()]['disk']['by_id'] if 0 <= self.boot_table.currentRow() < len(self.boot_rows) else None
+        widgets = [self.tree, self.disk_table, self.boot_table, *combos]
+        scrolls = [(w, w.verticalScrollBar().value(), w.horizontalScrollBar().value()) for w in widgets[:3]]
+        plan = self.plan
+        checks = (self.backup.isChecked(), self.physical.isChecked())
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            self._render_snapshot(snapshot)
+            if previous:
+                self.pool_combo.setCurrentIndex(self.pool_combo.findData(choices[0]))
+                self.pool_changed()
+                for c, choice in zip(combos[1:], choices[1:]):
+                    c.setCurrentIndex(c.findData(choice))
+            self.tree.clearSelection()
+            def restore(item):
+                if item.data(0, Qt.ItemDataRole.UserRole) == tree_key:
+                    self.tree.setCurrentItem(item)
+                for i in range(item.childCount()):
+                    restore(item.child(i))
+            for i in range(self.tree.topLevelItemCount()):
+                restore(self.tree.topLevelItem(i))
+            self.disk_table.clearSelection()
+            self.disk_table.setCurrentCell(-1, -1)
+            for i, d in enumerate(snapshot['disks']):
+                if disk and d.get('by_id') == disk:
+                    self.disk_table.selectRow(i)
+            if previous:
+                self.boot_table.clearSelection()
+                self.boot_table.setCurrentCell(-1, -1)
+                for i, row in enumerate(self.boot_rows):
+                    if boot_key and row['disk']['by_id'] == boot_key:
+                        self.boot_table.selectRow(i)
+            self.boot_detail.clear()
+            self.boot_selected()
+            if plan and previous and safety_fingerprint(previous) == safety_fingerprint(snapshot):
+                self.plan = plan
+                self.render_plan(plan)
+                self.backup.setChecked(checks[0])
+                self.physical.setChecked(checks[1])
+            elif plan:
+                self.plan_view.setText('Piano invalidato: sono cambiati dati rilevanti. Genera una nuova anteprima.')
+            if previous and choices[0] is not None and self.pool_combo.currentIndex() < 0:
+                self.issues.setText('Pool selezionato non più disponibile: operazioni sospese. Seleziona esplicitamente un pool.')
+            for w, vertical, horizontal in scrolls:
+                w.verticalScrollBar().setValue(vertical)
+                w.horizontalScrollBar().setValue(horizontal)
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+
+    def _render_snapshot(self, snapshot):
         self.snapshot = snapshot
         self.last_error = ""
         self.store.snapshot(snapshot)
@@ -549,12 +657,13 @@ class Window(QMainWindow):
         for pool in snapshot["pools"]:
             self.pool_combo.addItem(f"{pool['name']} · {pool['role']} · {raid_label(pool)}", pool["guid"])
         index = self.pool_combo.findData(previous)
-        self.pool_combo.setCurrentIndex(max(index, 0))
+        self.pool_combo.setCurrentIndex(index if previous is not None else -1)
         self._building = False
         self.pool_changed()
         self.render_disks()
         self.render_boot()
         problems = snapshot["issues"] + [w for p in snapshot["pools"] for w in p.get("warnings", [])]
+        problems += snapshot.get('hardware_notes', [])
         if snapshot.get("helper_version") != __version__:
             problems.append("Helper da aggiornare alla versione " + __version__ + ": piani e interventi non abilitati.")
         if any(not row["report"]["configuration_ready"] for row in self.boot_rows):
@@ -564,18 +673,13 @@ class Window(QMainWindow):
         self.issues.setStyleSheet("color:" + ("#f4bf65" if problems else "#96a9c6"))
         self._age()
         self.statusBar().showMessage("Analisi aggiornata · " + snapshot["pve_version"])
-        if self.tree.topLevelItemCount():
-            self.tree.setCurrentItem(self.tree.topLevelItem(0))
         for pool in snapshot["pools"]:
             unknown = (pool.get("warnings") or not data_groups(pool)
                        or any(g["kind"] == "disk" and g["children"] for g in data_groups(pool)))
             key = (snapshot["host_id"], pool["guid"], str(pool.get("warnings")))
             if unknown and key not in self.raid_questions:
                 self.raid_questions.add(key)
-                def ask(pool_id=pool["guid"]):
-                    self.pool_combo.setCurrentIndex(self.pool_combo.findData(pool_id))
-                    self.ask_raid()
-                QTimer.singleShot(100, ask)
+                self.issues.setText(self.issues.text() + ' · Topologia da chiarire: seleziona il pool e usa il pulsante di chiarimento RAID.')
                 break
 
     def _age(self):
@@ -660,6 +764,8 @@ class Window(QMainWindow):
         self.pool_combo.setCurrentIndex(self.pool_combo.findData(pool_id))
         body = f"<h2>{html.escape(pool['name'])}</h2><p>{html.escape(pool['role'])} · {html.escape(raid_label(pool))}</p>"
         body += "<p><b>Stato:</b> " + html.escape(pool["state"]) + "<br><b>Scan:</b> " + html.escape(pool["scan"]) + "</p>"
+        metrics = self.snapshot.get('pool_metrics', {}).get(pool['name'], {})
+        body += '<p>Capacità utilizzata: ' + html.escape(str(metrics.get('capacity_percent', 'N/D'))) + '% · Frammentazione: ' + html.escape(str(metrics.get('fragmentation_percent', 'N/D'))) + '%</p>'
         if member_id:
             member = next((m for m in leaves(pool) if (m["guid"] or m["name"]) == member_id), None)
             if member:
@@ -716,6 +822,14 @@ class Window(QMainWindow):
             box.setWindowTitle("Diagnostica SMART · " + disk["serial"])
             box.setText("Stato SMART: " + str(disk.get("smart", {}).get("passed", "non noto")) + "\nDati relativi all'ultima analisi, non una garanzia di integrità.")
             box.setDetailedText(json.dumps(disk.get("smart", {}), indent=2, ensure_ascii=False))
+            raw = disk.get('smart', {}).get('raw', {})
+            nvme = raw.get('nvme_smart_health_information_log', {})
+            box.setInformativeText('Temperatura: ' + str(disk.get('smart', {}).get('temperature', 'N/D')) +
+                '\nOre: ' + str(raw.get('power_on_time', {}).get('hours', nvme.get('power_on_hours', 'N/D'))) +
+                '\nNVMe usura %: ' + str(nvme.get('percentage_used', 'N/D')) +
+                '\nNVMe errori media: ' + str(nvme.get('media_errors', 'N/D')) +
+                '\nNVMe critical warning: ' + str(nvme.get('critical_warning', 'N/D')) +
+                '\nWWN: ' + str(disk.get('wwn', 'N/D')))
             box.exec()
 
     def ask_raid(self):
@@ -783,10 +897,13 @@ class Window(QMainWindow):
     def render_plan(self, plan):
         self.plan = plan
         e = html.escape
-        label = "Disco da escludere" if plan.get("action") == "offline" else "Disco di cui ripristinare SOLO l'ESP" if plan.get("action") == "repair_boot" else "Nuovo disco"
+        label = "Disco da escludere" if plan.get("action") == "offline" else "Disco di cui ripristinare SOLO l'ESP" if plan.get("action") in {"repair_boot", "clean_boot"} else "Nuovo disco"
         self.physical.setText("Identità e posizione del disco da escludere verificate" if plan.get("action") == "offline" else
-                              "Identità del disco e della sola ESP da ripristinare verificate" if plan.get("action") == "repair_boot" else "Identità e posizione del nuovo disco verificate")
+                              "Identità del disco e della sola ESP da ripristinare verificate" if plan.get("action") in {"repair_boot", "clean_boot"} else "Identità e posizione del nuovo disco verificate")
         body = f"<h2>{e(plan['pool'])} · {e(plan['role'])}</h2><p>{e(plan['raid'])}<br>{label}: <b>{e(plan['target']['serial'])}</b> · {e(plan['target']['by_id'])}</p>"
+        body += '<p>Nodo: ' + e((self.snapshot or {}).get('hostname', '?')) + ' · Pool GUID: ' + e(plan['pool_guid']) + '<br>Snapshot di sicurezza: ' + e(plan['fingerprint']) + '</p>'
+        if plan.get('action') == 'clean_boot':
+            body += '<h3>Pulizia del registro ESP: confermare che gli UUID assenti non appartengano a dischi temporaneamente scollegati.</h3>'
         if plan["blocks"]:
             body += "<h3 style='color:#f18c99'>Esecuzione bloccata</h3><ul>" + "".join("<li>" + e(b) + "</li>" for b in plan["blocks"]) + "</ul>"
         else:
@@ -797,16 +914,16 @@ class Window(QMainWindow):
         if plan.get("role") in {"BOOT", "MISTO"} and plan.get("action") != "offline":
             body += "<p><b>Esito boot separato da ZFS.</b> In una sostituzione la fase EFI attende il resilver. Il completamento richiede configurazione EFI di entrambi i membri e prove di avvio autonomo distinte.</p>"
         self.plan_view.setHtml(body)
-        self.execute_button.setEnabled(not plan["blocks"] and not self.is_demo())
+        self.execute_button.setEnabled(not plan["blocks"] and not plan.get('read_only') and not self.is_demo())
 
     def execute(self):
         plan = self.plan
-        if not plan or plan["blocks"] or self.is_demo():
+        if not plan or plan.get('read_only') or plan["blocks"] or self.is_demo():
             return
         if not self.backup.isChecked() or not self.physical.isChecked():
             QMessageBox.information(self, "Approvazione", "Conferma backup/manutenzione e identificazione fisica del ricambio.")
             return
-        label = "disco da escludere" if plan.get("action") == "offline" else "disco di cui ripristinare SOLO l'ESP" if plan.get("action") == "repair_boot" else "disco nuovo da inizializzare"
+        label = "disco da escludere" if plan.get("action") == "offline" else "disco di cui ripristinare SOLO l'ESP" if plan.get("action") in {"repair_boot", "clean_boot"} else "disco nuovo da inizializzare"
         serial, ok = QInputDialog.getText(self, "Approvazione del piano", "Digita il seriale del SOLO " + label + ":\n" + plan["target"]["serial"])
         if not ok:
             return
@@ -826,11 +943,16 @@ class Window(QMainWindow):
             return
         def get():
             jobs = self.backend.rpc({"op": "list_jobs"})
+            if isinstance(self.backend, SSHBackend) and self.backend.connection.read_only:
+                return jobs
             states = {"MONITORING", "QUEUED", "RUNNING", "WAITING_RESILVER", "BOOT_REVIEW_REQUIRED", "BOOT_TEST_REQUIRED", "ZFS_REVIEW_REQUIRED"}
             return [self.backend.rpc({"op": "status", "id": j["id"]}) if j.get("state") in states or (j.get("role") in {"BOOT", "MISTO"} and j.get("state") == "COMPLETED") else j for j in jobs if j.get("state") not in {"LED", "LED_FINISHED"}]
         self.asynchronous(get, self.render_jobs, "Recupero degli interventi persistenti sul nodo…")
 
     def render_jobs(self, jobs):
+        if self.snapshot and not self.is_demo():
+            self.store.set('jobs:' + self.snapshot['host_id'], jobs)
+        selected_id = self.jobs[self.job_table.currentRow()]['id'] if 0 <= self.job_table.currentRow() < len(self.jobs) else None
         self.jobs = list(reversed(jobs))
         self.job_table.setRowCount(len(self.jobs))
         for row, job in enumerate(self.jobs):
@@ -840,7 +962,8 @@ class Window(QMainWindow):
                     item.setForeground(color_for(val))
                 self.job_table.setItem(row, col, item)
         if self.jobs:
-            self.job_table.selectRow(0)
+            index = next((i for i, j in enumerate(self.jobs) if j['id'] == selected_id), -1 if selected_id else 0)
+            self.job_table.setCurrentCell(index, 0)
             self.job_selected()
         else:
             self.job_detail.setHtml("<p>Nessun intervento sul nodo. I piani non ancora inviati sono indicati come PREVIEW.</p>")
@@ -867,6 +990,7 @@ class Window(QMainWindow):
             body += "".join("<li>" + e(name + ": " + c["state"] + " · " + c["detail"]) + "</li>" for name, c in disk["checks"].items()) + "</ul>"
         if job.get("scan"):
             body += "<p>" + e(job["scan"]).replace("\n", "<br>") + "</p>"
+            body += '<p>Velocità: ' + e(job.get('scan_rate', 'Non disponibile')) + ' · ETA ZFS: ' + e(job.get('scan_eta', 'Non disponibile')) + '</p>'
         for event in job.get("events", []):
             body += f"<h4>{e(event['state'])}</h4><pre>{e(event['command'])}</pre><pre>{e(event.get('out',''))}</pre><pre>{e(event.get('err',''))}</pre>"
         if job.get("boot_test"):
@@ -913,10 +1037,21 @@ class Window(QMainWindow):
     def export_report(self):
         if not self.snapshot:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Esporta rapporto anonimizzato", "rapporto-zfs.json", "JSON (*.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "Esporta rapporto anonimizzato", "rapporto-zfs.json", "JSON (*.json);;HTML (*.html);;PDF (*.pdf)")
         if path:
             report = {**self.snapshot, "boot_reports": [boot_report(self.snapshot, p) for p in self.snapshot["pools"] if p.get("role") in {"BOOT", "MISTO"}]}
-            Path(path).write_text(json.dumps(anonymize(report), indent=2, ensure_ascii=False), encoding="utf-8")
+            report['interventions'] = self.jobs or self.store.get('jobs:' + self.snapshot['host_id'], [])
+            rendered = json.dumps(anonymize(report), indent=2, ensure_ascii=False)
+            document = '<h1>Rapporto Proxmox ZFS Assistant</h1><p>Dati anonimizzati; avvio fisico separato dallo stato ZFS.</p><pre>' + html.escape(rendered) + '</pre>'
+            if Path(path).suffix.lower() == '.pdf':
+                printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+                printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+                printer.setOutputFileName(path)
+                text = QTextDocument()
+                text.setHtml(document)
+                text.print_(printer)
+            else:
+                Path(path).write_text(document if Path(path).suffix.lower() == '.html' else rendered, encoding='utf-8')
             QMessageBox.information(self, "Rapporto esportato", "Campi identificativi e output grezzi rimossi o mascherati. Rivedi comunque il file prima di pubblicarlo.")
 
     def _poll(self):

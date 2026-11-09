@@ -1,5 +1,6 @@
 # Compatibilità e stato del collaudo
 
+Aggiornamento 0.3.0: [comportamento attuale, estensioni e collaudo](collaudo-0.3.md). Le limitazioni precedenti descritte sotto sono aggiornate da questa nota.
 Versione 0.2.0, 2 novembre 2026. Il codice è implementato e sottoposto a test automatici e verifica della GUI su Windows. Non è stato collegato a un server Proxmox reale durante lo sviluppo di questa versione. Le regressioni del caso EFI usano esclusivamente dati sintetici; non attribuiscono una causa al guasto segnalato.
 
 | Configurazione | Diagnostica implementata | Esecuzione implementata | Verifica effettuata |

@@ -2,9 +2,9 @@
 
 App desktop Windows in Python per diagnosticare dischi e pool ZFS di Proxmox VE 8 e 9 e guidare la sostituzione dei membri guasti. Interfaccia in italiano, collegamento SSH e comandi spiegati prima dell'approvazione. Codice originale con [licenza MIT](LICENSE).
 
-**Versione 0.2.0 da collaudare in laboratorio.** GUI, motore e helper sono implementati e verificati con test automatici e dati sintetici. Non è ancora certificata la compatibilità con server, bootloader o LED reali. Leggi la [matrice di compatibilità](docs/compatibilita.md) prima di usare operazioni modificative.
+**Versione 0.3.0 da collaudare in laboratorio.** GUI, motore e helper sono implementati e verificati con test automatici e dati sintetici. Non è ancora certificata la compatibilità con server, bootloader o LED reali. Leggi la [matrice di compatibilità](docs/compatibilita.md) prima di usare operazioni modificative.
 
-**Aggiornamento da 0.1.0:** a interventi conclusi, usa **Installa / aggiorna helper sul nodo** dalla scheda Connessione e ripeti l'analisi. I piani richiedono app e helper della stessa versione. Le correzioni sono elencate nel [changelog](CHANGELOG.md).
+**Aggiornamento da 0.1.0 / 0.2.0:** a interventi conclusi, usa **Installa / aggiorna helper sul nodo** dalla scheda Connessione e ripeti l'analisi. I piani richiedono app e helper della stessa versione. Le correzioni sono elencate nel [changelog](CHANGELOG.md).
 
 ![Panoramica con dati dimostrativi](docs/assets/panoramica.png)
 
@@ -14,12 +14,23 @@ In questa cartella esegui `avvia.cmd`. Se parti da un clone nuovo, installa Pyth
 
 Per il pacchetto compilato, estrai l'intero ZIP e avvia `ProxmoxZfsAssistant.exe`. Conserva tutte le librerie e le licenze della distribuzione.
 
+## Novità 0.3.0
+
+- Refresh stabile: pool GUID, dischi, scheda e scorrimento conservati; nessun ripiego su un altro pool se il target scompare.
+- GRUB su ZFS: verifica delle entry e dei file nel dataset root; systemd-boot: verifica dei percorsi indicati nelle entry della ESP.
+- Ripristino controllato della ESP superstite, senza richiedere un secondo disco già sano; pulizia UUID assenti approvabile dopo ricostruzione e verifica EFI.
+- Pool VM con mirror più ampi, RAIDZ1/2/3 e più vdev dati; spare, dRAID, classi ausiliarie e layout non riconosciuti restano bloccati.
+- Profili server senza password salvate, modalità sola lettura con dry-run, cronologia locale e rapporti JSON/HTML/PDF anonimizzati.
+- Installazione Windows con `py` oppure `python`, messaggi persistenti in caso di errore.
+
+Procedura di collaudo e limiti: [versione 0.3.0](docs/collaudo-0.3.md).
+
 ## Funzioni implementate
 
 - Albero pool → vdev → dischi con mirror e livelli RAIDZ rilevati, anche con membri assenti.
 - Distinzione boot, VM e ruolo misto tramite filesystem root, partizioni e configurazione storage.
 - Inventario, SMART, seriali, posizioni fisiche e storico locale SQLite.
-- Piani per mirror di due membri e pool VM RAIDZ1/2 di tre membri, con controlli sul nodo.
+- Piani per boot mirror di due membri e pool VM mirror/RAIDZ1/2/3 anche con più vdev, con controlli sul nodo.
 - Gestione GPT ed ESP nei layout boot supportati, con scelta GRUB o systemd-boot rilevata.
 - Diagnostica EFI di entrambi i dischi, indipendente dallo stato ONLINE del pool, e ripristino approvato della sola ESP selezionata.
 - Fase EFI dopo il resilver, refresh esplicito e completamento boot subordinato a configurazione verificata e prove fisiche su entrambi i membri.

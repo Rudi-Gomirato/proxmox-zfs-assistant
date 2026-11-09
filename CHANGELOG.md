@@ -1,5 +1,17 @@
 # Modifiche
 
+## 0.3.0 — 9 novembre 2026
+
+- Corretto il cambio automatico del pool: selezioni stabili, nessun fallback, nessun cambio da richieste di chiarimento RAID; controlli del target congelati durante le richieste SSH.
+- Ignorati snapshot precedenti; piani conservati se il fingerprint di sicurezza è invariato, con ordine degli elementi normalizzato. Cambiamenti reali richiedono nuova approvazione.
+- Distinte entry GRUB/ZFS e systemd-boot, con percorsi verificati e risultati ERROR/UNKNOWN. Nessuna esecuzione degli script di configurazione durante la diagnosi.
+- Ripristino della ESP superstite su mirror degradato limitato a FAT32 coerente, registrazione e configurazione riconosciute, senza formattazione. Pulizia UUID assenti con piano separato dopo verifica dei due membri.
+- Estese le sostituzioni dati a mirror di più membri, RAIDZ1/2/3 e più vdev sani. Spare e topologie non collaudate restano bloccati.
+- Profili di connessione, modalità sola lettura applicata anche dall'helper, dry-run senza salvataggio di un piano eseguibile, retention configurabile e cronologia privata.
+- Rapporto anonimizzato JSON/HTML/PDF con interventi; evidenze prima/dopo e operatore nel registro del nodo, fasi e target per comando.
+- Dettagli SMART/NVMe, capacità/frammentazione, avviso euristico di volume RAID, velocità ed ETA quando riportate da ZFS.
+- Installer con fallback dal launcher a python, controllo versione e pausa sugli errori; test CI senza launcher Python.
+
 ## 0.2.0 — 2 novembre 2026
 
 - Separati gli esiti ZFS, resilver, configurazione EFI e avvio autonomo. Un mirror ONLINE non conclude più un intervento sul boot.

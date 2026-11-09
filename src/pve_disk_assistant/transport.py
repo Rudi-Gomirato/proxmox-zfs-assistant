@@ -26,6 +26,7 @@ class Connection:
     key_file: str = ""
     password: str = field(default="", repr=False)
     sudo: bool = False
+    read_only: bool = False
 
 
 class HostVerificationRequired(Exception):
@@ -146,6 +147,12 @@ class SSHBackend:
 
     def rpc(self, request):
         command = ("sudo -n " if self.connection.sudo else "") + RPC
+        if self.connection.read_only:
+            command += ' --read-only'
+            if request.get('op') == 'plan':
+                request = {**request, 'op': 'preview'}
+            if request.get('op') not in {'collect', 'version', 'list_jobs', 'preview'}:
+                raise RuntimeError('Modalità sola lettura: operazione modificativa non consentita.')
         if request.get("op") not in {"collect", "version"}:
             try:
                 version = self._call(command, {"op": "version"})

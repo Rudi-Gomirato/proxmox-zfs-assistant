@@ -1,5 +1,6 @@
 # Manuale operativo
 
+Aggiornamento 0.3.0: [comportamento attuale, estensioni e collaudo](collaudo-0.3.md). Le limitazioni precedenti descritte sotto sono aggiornate da questa nota.
 ## Avviare e provare l'app
 
 Su Windows apri `avvia.cmd` nella cartella del progetto. L'app parte con dati dimostrativi: nessuna connessione SSH e nessuna scrittura sui dischi. Dalla Panoramica puoi scegliere VM mirror, VM RAIDZ1 oppure EFI non valida (root mirror ONLINE con una ESP non riconosciuta).

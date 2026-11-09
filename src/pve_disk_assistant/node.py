@@ -203,6 +203,15 @@ def collect():
         snapshot["issues"].append("Nessun pool ZFS importato identificato.")
         snapshot["complete"] = False
     classify(snapshot)
+    metrics = run(['zpool', 'list', '-Hp', '-o', 'name,size,alloc,free,cap,frag,health'])
+    snapshot['pool_metrics'] = {}
+    if metrics['code'] == 0:
+        for line in metrics['out'].splitlines():
+            values = line.split('\t')
+            if len(values) == 7:
+                snapshot['pool_metrics'][values[0]] = dict(zip(('size', 'allocated', 'free', 'capacity_percent', 'fragmentation_percent', 'health'), values[1:]))
+    snapshot['hardware_notes'] = ['Possibile volume RAID/virtuale: ' + d['path'] + '; verificare controller e accesso SMART ai dischi fisici.'
+        for d in snapshot['disks'] if re.search(r'logical|virtual disk|raid', d.get('model', ''), re.I)]
     snapshot["boot"] = collect_boot(snapshot, run, HELPER)
     return snapshot
 
@@ -257,6 +266,9 @@ def locked(name="operation"):
 def prepare(request):
     snapshot = collect()
     plan = plan_replacement(snapshot, request)
+    import getpass
+    plan["operator"] = os.environ.get("SUDO_USER") or getpass.getuser()
+    plan["before"] = snapshot
     plan["id"] = uuid.uuid4().hex
     plan["created_at"] = time.time()
     plan["helper_version"] = __version__
@@ -431,6 +443,10 @@ def perform_job(identifier):
                     for index in range(plan.get("next_step", 0), len(plan["steps"])):
                         step = plan["steps"][index]
                         verify_target(plan)
+                        if step['phase'] == 'clean_boot':
+                            checked = plan_replacement(collect(), plan['request'])
+                            if checked['blocks'] or checked['fingerprint'] != plan['fingerprint']:
+                                raise SafetyError('Registro o mirror cambiati: pulizia UUID annullata.')
                         if step["phase"] in {"replace", "offline"}:
                             if plan.get("source"):
                                 verify_copied_layout(plan)
@@ -451,7 +467,7 @@ def perform_job(identifier):
                         if step["phase"] == "boot":
                             verify_partition(plan, step["argv"][2])
                             verify_boot_write(plan, step)
-                        event = {"step": index, "command": step["command"], "started_at": utcnow(), "state": "STARTED"}
+                        event = {"phase": step["phase"], "pool_guid": plan["pool_guid"], "target": plan["target"]["by_id"], "step": index, "command": step["command"], "started_at": utcnow(), "state": "STARTED"}
                         plan["events"].append(event)
                         save_record(plan)
                         result = run(step["argv"], timeout=120)
@@ -505,6 +521,10 @@ def _get_status(identifier):
         pool = next((p for p in snapshot["pools"] if p["guid"] == plan["pool_guid"]), None)
         plan["scan"] = pool.get("scan", "") if pool else "Pool non rilevato"
         plan["scan_percent"] = pool.get("scan_percent") if pool else None
+        rate = re.search(r'(\S+/s)', plan['scan'])
+        eta = re.search(r'([^,\n]+) to go', plan['scan'])
+        plan['scan_rate'] = rate[1] if rate else 'Non disponibile'
+        plan['scan_eta'] = eta[1].strip() if eta else 'Non disponibile'
         plan["last_checked"] = snapshot["collected_at"]
         ready = bool(pool and zfs_ready(plan, snapshot, pool))
         plan["zfs_state"] = "OK" if ready else "IN_CORSO" if "in progress" in plan["scan"] else "DA_VERIFICARE"
@@ -529,6 +549,7 @@ def _get_status(identifier):
                     save_record(plan)
             return plan
         if ready:
+            plan["after"] = snapshot
             if is_boot:
                 report = plan["boot_validation"]
                 expected = {plan["target"]["serial"], (plan.get("source") or {}).get("serial", "")}
@@ -678,12 +699,17 @@ def shutdown(request):
 
 
 def dispatch(request):
+    if '--read-only' in sys.argv and request.get('op') not in {'collect', 'version', 'preview', 'list_jobs'}:
+        raise SafetyError('Helper in sola lettura: operazione non consentita.')
     state_dir()
     operation = request.get("op")
     if operation == "collect":
         return collect()
     if operation == "version":
         return {"version": __version__, "schema": 2}
+    if operation == 'preview':
+        plan = plan_replacement(collect(), request['request'])
+        return {**plan, 'id': 'dry-run', 'state': 'PREVIEW', 'events': [], 'read_only': True}
     if operation == "plan":
         return prepare(request["request"])
     if operation == "submit":

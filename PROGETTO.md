@@ -1,5 +1,6 @@
 # Assistente desktop per la diagnosi e la sostituzione dei dischi ZFS in Proxmox
 
+Aggiornamento 0.3.0: [comportamento attuale, estensioni e collaudo](docs/collaudo-0.3.md).
 Documento di progetto — versione 0.6 — 2 novembre 2026<br>
 Referente: Rudi Gomirato  
 Nome provvisorio del repository: `proxmox-zfs-assistant`  

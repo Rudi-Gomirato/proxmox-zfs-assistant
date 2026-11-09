@@ -13,6 +13,7 @@ import stat
 import struct
 import sys
 import tempfile
+import shlex
 from pathlib import Path
 
 from .core import ESP, GOOD, SafetyError, disk_for_member, leaves, partition_for, digest
@@ -77,6 +78,8 @@ def file_inventory(directory):
             relative = path.relative_to(root).as_posix()
             size = path.stat().st_size
             item = {"path": relative, "size": size}
+            if relative.lower().endswith((".cfg", ".conf")) and size <= 2 * 1024 * 1024:
+                item['text'] = path.read_text(encoding='utf-8', errors='replace')
             if relative.lower().endswith(".efi"):
                 if size > 64 * 1024 * 1024:
                     raise SafetyError("File EFI troppo grande per la diagnostica limitata.")
@@ -142,12 +145,14 @@ def collect_boot(snapshot, run, helper):
     boot = {**previous, "firmware_mode": firmware, "architecture": getattr(os.uname(), "machine", "unknown").lower(),
             "secure_boot": secure_boot, "registered_uuids": registrations, "registration_readable": readable,
             "nvram": {**parse_boot_entries(nvram["out"]), "code": nvram["code"], "error": nvram["err"]},
+            'missing_uuids': [u for u in registrations if re.fullmatch(r'[0-9A-F]{4}-[0-9A-F]{4}', u) and not Path('/dev/disk/by-uuid', u).exists()],
             "esps": {}, "grub_config_present": False, "grub_config_sha256": ""}
     grub_config = Path("/boot/grub/grub.cfg")
     try:
         boot["grub_config_present"] = grub_config.is_file() and grub_config.stat().st_size > 0
         if boot["grub_config_present"] and grub_config.stat().st_size <= 2 * 1024 * 1024:
             boot["grub_config_sha256"] = hashlib.sha256(grub_config.read_bytes()).hexdigest()
+            boot['grub_zfs'] = inspect_grub_zfs(grub_config.read_text(errors='replace'), snapshot, run)
     except OSError:
         pass
     disks = []
@@ -255,11 +260,10 @@ def boot_report(snapshot, pool):
               "File del bootloader EFI con struttura PE/COFF x64 verificata; firme Secure Boot non certificate.")
         configs = [p for p, f in files.items() if f.get("size", 0) > 0 and
                    (p.endswith("grub.cfg") if mode == "grub" else p.startswith("loader/entries/") and p.endswith(".conf"))]
-        config_ok = bool(configs) or (mode == "grub" and boot.get("grub_config_present", False))
-        kernels = [p for p, f in files.items() if f.get("size", 0) > 0 and "/vmlinuz-" in p]
-        kernel_ok = any(files.get(p.replace("/vmlinuz-", "/initrd.img-"), {}).get("size", 0) > 0 for p in kernels)
-        check("configuration", "OK" if config_ok and kernel_ok else "ERROR" if info.get("inspection_ok") else "UNKNOWN",
-              "Configurazione del loader e almeno una coppia kernel/initrd nella ESP.")
+        configuration = entry_report(files, configs, mode)
+        if mode == 'grub' and configuration['state'] != 'OK':
+            configuration = boot.get('grub_zfs', configuration)
+        check('configuration', configuration['state'], configuration['detail'])
         nvram = boot.get("nvram", {})
         matching = [e for e in nvram.get("entries", []) if str(e.get("partuuid", "")).casefold() == part.get("partuuid", "").casefold()
                     and e.get("active") and e.get("file") in valid and (e["id"] in nvram.get("order", []) or e["id"] == nvram.get("current"))]
@@ -272,7 +276,7 @@ def boot_report(snapshot, pool):
             check("secure_boot", "UNKNOWN", "systemd-boot con Secure Boot non è certificabile da questa procedura.")
         record["evidence_digest"] = digest({"uuid": fs_uuid, "partuuid": part.get("partuuid"), "mode": mode,
                                             "files": sorted(info.get("files", []), key=lambda f: f["path"]), "secure_boot": boot.get("secure_boot"),
-                                            "grub_config": boot.get("grub_config_sha256", "") if mode == "grub" else ""})
+                                            "grub_zfs": boot.get("grub_zfs") if mode == "grub" else None, "grub_config": boot.get("grub_config_sha256", "") if mode == "grub" else ""})
         record["configuration_ready"] = bool(checks) and all(c["state"] == "OK" for c in checks.values())
         record["state"] = "OK" if record["configuration_ready"] else "ERROR" if any(c["state"] == "ERROR" for c in checks.values()) else "UNKNOWN"
         results.append(record)
@@ -280,4 +284,77 @@ def boot_report(snapshot, pool):
     return {"firmware_mode": boot.get("firmware_mode", "UNKNOWN"), "secure_boot": boot.get("secure_boot"),
             "disks": results, "configuration_ready": ready, "autonomous_boot": "NON_TESTATO",
             "nvram_readable": boot.get("nvram", {}).get("code") == 0,
+            'missing_uuids': boot.get('missing_uuids', []),
             "warnings": [line.strip() for line in boot.get("status", "").splitlines() if "WARN:" in line or "ERROR:" in line]}
+
+
+def boot_pairs(text):
+    """Read literal directives, never evaluate GRUB shell code."""
+    kernel, initrds = None, []
+    for line in text.splitlines():
+        try:
+            words = shlex.split(line, comments=True)
+        except ValueError:
+            kernel, initrds = None, []
+            continue
+        if not words:
+            continue
+        if words[0] in {'menuentry', 'submenu', '}', 'linux', 'linuxefi'}:
+            if kernel:
+                yield kernel, initrds
+            kernel, initrds = None, []
+        if words[0] in {'linux', 'linuxefi'}:
+            kernel = words[1:] if len(words) > 1 else None
+        elif words[0] in {'initrd', 'initrdefi'} and kernel:
+            initrds.extend(words[1:])
+    if kernel:
+        yield kernel, initrds
+
+
+def entry_report(files, configs, mode):
+    details = []
+    for config in configs:
+        for kernel, initrds in boot_pairs(files[config].get('text', '')):
+            paths = [kernel[0], *initrds]
+            if not initrds or any(not p.startswith('/') or '..' in p.split('/') or '$' in p for p in paths):
+                continue
+            missing = [p for p in paths if files.get(normalize_path(p), {}).get('size', 0) <= 0]
+            details.append(config + ': ' + ', '.join(paths) + ('; mancanti: ' + ', '.join(missing) if missing else '; verificati sulla ESP'))
+            if not missing:
+                return {'state': 'OK', 'detail': details[-1]}
+    return {'state': 'ERROR' if details else 'UNKNOWN', 'detail': '; '.join(details) or
+            'Entry ' + mode + ' non verificabili: controllare configurazione e percorsi kernel/initrd, senza eseguire script GRUB.'}
+
+
+def inspect_grub_zfs(text, snapshot, run):
+    root = snapshot.get('root', {})
+    dataset = root.get('source', '')
+    if root.get('fstype') != 'zfs' or '/' not in dataset:
+        return {'state': 'UNKNOWN', 'detail': 'Root ZFS non identificata per GRUB.'}
+    prefix = '/' + dataset.split('/', 1)[1] + '@'
+    details, evidence, uncertain = [], [], False
+    for kernel, initrds in boot_pairs(text):
+        if 'root=ZFS=' + dataset not in kernel[1:] or not initrds:
+            continue
+        paths = [p[len(prefix):] if p.startswith(prefix + '/') else p for p in [kernel[0], *initrds]]
+        if any(not re.fullmatch(r'/boot/(?:vmlinuz-|initrd\.img-)[A-Za-z0-9._+-]+', p) for p in paths):
+            continue
+        valid = True
+        for path in paths:
+            try:
+                exists = Path(path).is_file() and Path(path).stat().st_size > 0
+                if exists:
+                    st = Path(path).stat()
+                    evidence.append({'path': path, 'size': st.st_size, 'mtime_ns': getattr(st, 'st_mtime_ns', None)})
+                mount = run(['findmnt', '--json', '--target', path, '--output', 'SOURCE,FSTYPE'])
+                rows = json.loads(mount['out']).get('filesystems', [])
+                accessible = mount['code'] == 0 and len(rows) == 1 and rows[0].get('source') == dataset and rows[0].get('fstype') == 'zfs'
+                uncertain |= exists and not accessible
+            except (OSError, ValueError):
+                exists, accessible = False, False
+                uncertain = True
+            valid &= exists and accessible
+            details.append(path + (' verificato su ' + dataset if exists and accessible else ' mancante o dataset non verificato'))
+        if valid:
+            return {'state': 'OK', 'files': evidence, 'detail': 'GRUB /boot/grub/grub.cfg: ' + '; '.join(details)}
+    return {'state': 'ERROR' if details and not uncertain else 'UNKNOWN', 'detail': '; '.join(details) or 'Entry GRUB ZFS non riconosciute: verificare dataset e percorsi in /boot/grub/grub.cfg.'}

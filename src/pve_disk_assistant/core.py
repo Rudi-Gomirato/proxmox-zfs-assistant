@@ -229,12 +229,19 @@ def classify(snapshot):
 
 
 def safety_fingerprint(snapshot):
-    return digest({"host": snapshot.get("host_id"), "root": snapshot.get("root"),
+    def canonical(value):
+        if isinstance(value, dict):
+            return {k: canonical(v) for k, v in value.items()}
+        if isinstance(value, list):
+            items = [canonical(v) for v in value]
+            return sorted(items, key=digest) if all(isinstance(v, dict) for v in items) else items
+        return value
+    return digest(canonical({"host": snapshot.get("host_id"), "root": snapshot.get("root"),
                    "boot_id": snapshot.get("boot_id"),
                    "pools": snapshot.get("pools"),
                    "disks": [{k: v for k, v in d.items() if k not in {"smart", "temperature"}}
                              for d in snapshot.get("disks", [])],
-                   "boot": snapshot.get("boot"), "version": snapshot.get("pve_version")})
+                   "boot": snapshot.get("boot"), "version": snapshot.get("pve_version")}))
 
 
 def topology_fingerprint(pool):
@@ -248,6 +255,19 @@ def plan_replacement(snapshot, request):
     """Return an executable, server-derived plan or explicit blocking reasons."""
     if request.get("action") == "offline":
         return plan_offline(snapshot, request)
+    if request.get('action') == 'clean_boot':
+        plan = plan_boot_repair(snapshot, request)
+        from .boot import boot_report
+        pool = next(p for p in snapshot['pools'] if p['guid'] == plan['pool_guid'])
+        if not boot_report(snapshot, pool)['configuration_ready'] or pool['state'] != 'ONLINE':
+            plan['blocks'].append('Pulizia registro consentita solo dopo ricostruzione e verifica EFI di entrambi i membri.')
+        missing = snapshot.get('boot', {}).get('missing_uuids', [])
+        if not missing:
+            plan['blocks'].append('Nessun UUID assente verificato.')
+        plan.update(action='clean_boot', missing_uuids=missing, steps=[
+            {'argv': ['proxmox-boot-tool', 'clean'], 'command': 'proxmox-boot-tool clean', 'phase': 'clean_boot', 'explanation': 'Rimuove dal registro i riferimenti alle ESP assenti: ' + ', '.join(missing) + '. Confermare che i dischi non siano temporaneamente scollegati.'},
+            {'argv': ['proxmox-boot-tool', 'status'], 'command': 'proxmox-boot-tool status', 'phase': 'verify', 'explanation': 'Verifica il registro dopo la pulizia approvata.'}])
+        return plan
     if request.get("action") == "repair_boot":
         return plan_boot_repair(snapshot, request)
     blocks, warnings, steps = [], [], []
@@ -279,12 +299,18 @@ def plan_replacement(snapshot, request):
         blocks.append("Ricostruzione o scrub già in corso.")
     groups = data_groups(pool)
     group = next((g for g in groups if old in leaves(g)), None)
-    if len(groups) != 1 or group is None or any(x.get("section") != "data" for x in pool["children"]):
-        blocks.append("Sono supportati solo pool con un vdev dati e senza classi ausiliarie.")
+    member_ids = [m.get('guid') for m in leaves(pool)]
+    if not all(member_ids) or len(set(member_ids)) != len(member_ids):
+        blocks.append('GUID dei membri mancanti o duplicati: topologia ambigua.')
+    if group is None or any(x.get("section") != "data" for x in pool["children"]):
+        blocks.append("Classi ausiliarie, spare o vdev non identificato: esecuzione non supportata.")
     kind = group["kind"] if group else "unknown"
     members = leaves(group) if group else []
-    if not ((kind == "mirror" and len(members) == 2) or (kind in {"raidz1", "raidz2"} and len(members) == 3)):
-        blocks.append("Esecuzione prevista per mirror di due membri o RAIDZ1/2 di tre membri.")
+    if not ((kind == "mirror" and len(members) >= 2) or (kind in {"raidz1", "raidz2", "raidz3"} and len(members) >= int(kind[-1]) + 1)):
+        blocks.append("Vdev non supportato: richiesti mirror o RAIDZ1/2/3 con membri sufficienti.")
+    for other in groups:
+        if other is not group and (other['kind'] not in {'mirror', 'raidz1', 'raidz2', 'raidz3'} or any(m['state'] not in GOOD or any(m['errors']) or not disk_for_member(snapshot, m) for m in leaves(other))):
+            blocks.append('Altro vdev non supportato, degradato o non verificabile.')
     if any(n.get("kind") == "transient" for n in walk(pool)):
         blocks.append("Sostituzione o spare già attivo nella topologia.")
     if old["state"] not in BAD:
@@ -344,7 +370,7 @@ def plan_replacement(snapshot, request):
             blocks.append("Modalità firmware non verificata come UEFI; BIOS Legacy richiede una procedura distinta.")
         if snapshot.get("boot", {}).get("architecture") not in {"x86_64", "amd64"}:
             blocks.append("Architettura boot x86_64 non verificata.")
-        if kind != "mirror" or snapshot.get("root", {}).get("fstype") != "zfs" or snapshot["root"].get("source", "").split("/")[0] != pool["name"]:
+        if len(groups) != 1 or len(members) != 2 or kind != "mirror" or snapshot.get("root", {}).get("fstype") != "zfs" or snapshot["root"].get("source", "").split("/")[0] != pool["name"]:
             blocks.append("Boot supportato solo su root ZFS in mirror di due membri.")
         source = disk_for(snapshot, survivors[0]["name"]) if survivors else None
         source_report = next((r for r in report["disks"] if source and r["by_id"] == source.get("by_id")), None)
@@ -433,6 +459,12 @@ def plan_boot_repair(snapshot, request):
     peers = [r for r in report["disks"] if r["by_id"] != target["by_id"]]
     source_row = next((r for r in peers if r["configuration_ready"]), None)
     source = next((d for d in snapshot["disks"] if source_row and d.get("by_id") == source_row["by_id"]), None)
+    survivor_repair = (pool['state'] == 'DEGRADED' and member['state'] in GOOD
+        and all(disk_for_member(snapshot, m) is None and m['state'] in BAD for m in leaves(pool) if m is not member)
+        and row.get('mode') in {'grub', 'systemd'}
+        and all(row.get('checks', {}).get(k, {}).get('state') == 'OK' for k in ('fat32', 'filesystem', 'identity', 'registration', 'configuration')))
+    if survivor_repair:
+        source_row, source = row, target
     groups = data_groups(pool)
     if not (len(groups) == 1 and groups[0]["kind"] == "mirror" and len(leaves(groups[0])) == 2
             and len(pool["children"]) == 1 and pool.get("role") in {"BOOT", "MISTO"}
@@ -447,8 +479,8 @@ def plan_boot_repair(snapshot, request):
         blocks.append("Modalità dimostrativa: nessuna modifica reale.")
     if snapshot.get("boot", {}).get("firmware_mode") != "UEFI" or snapshot.get("boot", {}).get("architecture") not in {"x86_64", "amd64"}:
         blocks.append("Ripristino EFI disponibile solo con UEFI x86_64 verificato, non BIOS Legacy.")
-    if (pool["state"] not in GOOD or pool["errors"] != "No known data errors" or "in progress" in pool["scan"]
-            or any(m["state"] not in GOOD or len(m["errors"]) != 3 or any(m["errors"]) for m in leaves(pool))):
+    if (pool["state"] not in GOOD and not survivor_repair or pool["errors"] != "No known data errors" or "in progress" in pool["scan"]
+            or any((m['state'] not in GOOD and not (survivor_repair and m is not member)) or len(m["errors"]) != 3 or any(m["errors"]) for m in leaves(pool))):
         blocks.append("Prima del ripristino EFI il mirror ZFS deve essere ONLINE, senza errori o resilver attivo.")
     if not source or not source_row:
         blocks.append("Nessun altro membro con configurazione EFI verificata: richiede diagnosi manuale.")

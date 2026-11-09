@@ -137,7 +137,7 @@ def test_auxiliary_vdevs_block_execution():
 def test_more_than_one_data_vdev_is_not_treated_as_one_mirror():
     snap = inventory()
     snap["pools"][1]["children"].append(deepcopy(snap["pools"][1]["children"][0]))
-    assert any("un vdev" in b for b in plan(snap)["blocks"])
+    assert any("Altro vdev" in b for b in plan(snap)["blocks"])
 
 
 def test_three_disks_are_not_assumed_to_be_raidz1():

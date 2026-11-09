@@ -103,6 +103,9 @@ def add_boot_observations(snapshot, mode="systemd"):
                      for p in (binary, "EFI/BOOT/BOOTX64.EFI")]
             files += [{"path": p, "size": 4096} for p in ("loader/entries/proxmox-demo.conf" if mode == "systemd" else "EFI/proxmox/grub.cfg",
                         "EFI/proxmox/demo/vmlinuz-demo", "EFI/proxmox/demo/initrd.img-demo")]
+            for item in files:
+                if item['path'].endswith(('.conf', '.cfg')):
+                    item['text'] = 'linux /EFI/proxmox/demo/vmlinuz-demo\ninitrd /EFI/proxmox/demo/initrd.img-demo\n'
             esps[part["path"]] = {"probe_code": 0, "probe": {"TYPE": "vfat", "VERSION": "FAT32", "UUID": fs_uuid},
                 "signatures": [{"type": "vfat"}], "fsck_code": 0, "fsck_output": "Dati sintetici", "inspection_ok": True, "files": files}
     snapshot["boot"] = {"firmware_mode": "UEFI", "architecture": "x86_64", "secure_boot": False,

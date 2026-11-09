@@ -28,10 +28,11 @@ class Store:
 
     def snapshot(self, snapshot):
         from .core import disk_for_member, leaves
+        retention = max(10, min(10000, int(self.get('retention', 100))))
         with self._connect() as db:
             db.execute("INSERT INTO snapshots(host,at,data) VALUES (?,?,?)",
                        (snapshot["host_id"], datetime.now(timezone.utc).isoformat(), json.dumps(snapshot)))
-            db.execute("DELETE FROM snapshots WHERE id NOT IN (SELECT id FROM snapshots ORDER BY id DESC LIMIT 100)")
+            db.execute("DELETE FROM snapshots WHERE id NOT IN (SELECT id FROM snapshots ORDER BY id DESC LIMIT ?)", (retention,))
             for pool in snapshot["pools"]:
                 for member in leaves(pool):
                     disk = disk_for_member(snapshot, member)
