@@ -51,7 +51,7 @@ def helper_archive():
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         files = {"__main__.py": "from pve_disk_assistant.node import main\nmain()\n",
                  "pve_disk_assistant/__init__.py": (base / "__init__.py").read_text(encoding="utf-8")}
-        for filename in ("core.py", "node.py", "boot.py"):
+        for filename in ("core.py", "node.py", "boot.py", "esp.py"):
             files["pve_disk_assistant/" + filename] = (base / filename).read_text(encoding="utf-8")
         for name, contents in files.items():
             info = zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0))

@@ -71,9 +71,9 @@ Dopo l'inserimento aggiorna l'analisi, seleziona il nuovo seriale e genera il pi
 
 Per i pool VM l'app usa `zpool replace`. Se il membro è una partizione in un layout GPT dati ZFS riconosciuto, replica solo la tabella partizioni dal riferimento sano e rigenera i GUID. Non copia filesystem e non inizializza ESP o bootloader.
 
-Per il boot sono supportati root ZFS in mirror di due membri, UEFI x86_64, GPT con ESP e partizione ZFS e gestione riconoscibile tramite `proxmox-boot-tool`. Anche la configurazione EFI del membro di riferimento deve essere verificata. Il piano copia la GPT nella direzione sano → nuovo, rigenera i GUID e sostituisce la partizione ZFS. Attende poi il resilver, ricontrolla disco e ESP destinataria e prepara la sola ESP nuova nella modalità GRUB o systemd-boot rilevata. Esegue infine `proxmox-boot-tool refresh`, che sincronizza tutte le ESP registrate, e rilegge lo stato. Il GRUB legacy e i layout personalizzati restano bloccati.
+Per il boot sono supportati root ZFS in mirror di due membri, UEFI x86_64, GPT con ESP e partizione ZFS e gestione riconoscibile tramite `proxmox-boot-tool`. Anche la configurazione EFI del membro di riferimento deve essere verificata. Il piano copia la GPT nella direzione sano → nuovo, rigenera i GUID e sostituisce la partizione ZFS. Attende poi il resilver: la nuova ESP richiede un piano distinto e una seconda conferma di formattazione, nella modalità GRUB o systemd-boot rilevata. Vedi la [procedura nuova ESP](nuova-esp.md). Esegue infine `proxmox-boot-tool refresh`, che sincronizza tutte le ESP registrate, e rilegge lo stato. Il GRUB legacy e i layout personalizzati restano bloccati.
 
-La ripresa dopo il resilver avviene interrogando l'intervento dall'app e usa il cursore salvato sul nodo: non ripete GPT o replace. Se chiudi l'app nella fase WAITING_RESILVER, ZFS continua a ricostruire; riapri l'app e recupera gli interventi per avviare i passi EFI già approvati. Un esito ignoto non viene ritentato automaticamente.
+Dopo il resilver lo stato diventa ESP_INITIALIZATION_REQUIRED: recupera gli interventi e usa Prosegui con nuova ESP. Non vengono ripetuti GPT o replace. Chiudendo l'app in WAITING_RESILVER, ZFS continua a ricostruire. La fase EFI non parte automaticamente. Un esito ignoto non viene ritentato automaticamente.
 
 ## Diagnostica EFI e ripristino della sola ESP
 
@@ -84,7 +84,7 @@ Le letture dirette usano `blkid -p` e `wipefs --json`. L'ispezione dei file usa 
 Se il mirror è sano ma una ESP è incompleta, seleziona la riga e premi **Piano ripristino della sola ESP selezionata**. È richiesto un altro membro con configurazione EFI verificata. Il piano mostra comandi e spiegazioni e richiede approvazione con il seriale. Non contiene copia GPT, `zpool replace` o `grub-install` generico:
 
 - Una FAT32 già valida e coerente non viene formattata; viene reinizializzato il loader nella modalità del riferimento.
-- La formattazione è proposta soltanto se il probe diretto non rileva un filesystem e wipefs conferma l'assenza di firme, sulla sola partizione GPT EFI identificata. Una firma sconosciuta o una FAT danneggiata blocca il piano.
+- Questo ripristino non propone mai una formattazione. Una ESP nuova senza FAT32 usa esclusivamente [Inizializza nuova ESP dopo sostituzione disco](nuova-esp.md), con prova nel registro, lettura integrale e conferma dedicata. Una firma sconosciuta o una FAT danneggiata blocca il piano.
 - `init` riguarda la ESP selezionata; il successivo `refresh` sincronizza tutte le ESP registrate. I controlli finali riguardano nuovamente entrambi i dischi.
 
 Il piano conserva le evidenze precedenti e successive. FSTYPE vuoto non dimostra da solo una cancellazione né identifica la causa del problema. Gli UUID obsoleti nel registro e gli avvisi di proxmox-boot-tool sono segnalati, senza pulizia automatica. Richiedono verifica amministrativa prima del completamento.
@@ -120,7 +120,9 @@ La sostituzione viene registrata prima dell'esecuzione. Un worker separato sul n
 - WAITING_RESILVER: replace boot concluso, passi EFI sospesi finché il mirror non è ricostruito.
 - ZFS_REVIEW_REQUIRED: pool o membro non soddisfano i controlli conclusivi e non risulta una ricostruzione attiva.
 - BOOT_REVIEW_REQUIRED: ZFS ricostruito, ma configurazione EFI o registro richiedono verifica.
-- BOOT_TEST_REQUIRED: ZFS e configurazione EFI verificati; mancano le prove fisiche distinte dei due membri.
+- ESP_INITIALIZATION_REQUIRED: resilver concluso, richiesta una nuova approvazione per la ESP.
+- ESP_INITIALIZATION_LINKED: consultare il nuovo intervento EFI indicato nel record ZFS.
+- BOOT_TEST_PENDING (in precedenza BOOT_TEST_REQUIRED): ZFS e configurazione EFI verificati; mancano le prove fisiche distinte dei due membri.
 - COMPLETED: controlli ZFS soddisfatti; per il boot anche EFI di entrambi e prove di avvio autonomo registrate e ancora coerenti.
 - BLOCKED / FAILED / UNKNOWN: non ripetere alla cieca. Il dettaglio contiene i passi iniziati e gli esiti disponibili.
 

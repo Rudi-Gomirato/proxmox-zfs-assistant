@@ -64,7 +64,7 @@ def size_text(size):
 
 def color_for(state):
     return QColor("#71d7b3" if state in GOOD | {"COMPLETED", "OK"} else
-                  "#f4bf65" if state in {"DEGRADED", "MONITORING", "RUNNING", "QUEUED", "WAITING_RESILVER", "BOOT_TEST_REQUIRED"} else
+                  "#f4bf65" if state in {"DEGRADED", "MONITORING", "RUNNING", "QUEUED", "WAITING_RESILVER", "BOOT_TEST_REQUIRED", "BOOT_TEST_PENDING", "ESP_INITIALIZATION_REQUIRED"} else
                   "#f18c99" if state in BAD | {"FAILED", "UNKNOWN", "BLOCKED", "ERROR", "BOOT_REVIEW_REQUIRED", "ZFS_REVIEW_REQUIRED"} else "#b9cce6")
 
 
@@ -268,6 +268,7 @@ class Window(QMainWindow):
         actions = QHBoxLayout()
         self.button("Recupera interventi dal nodo", self.refresh_jobs, actions)
         self.button("Registra prova di avvio autonomo", self.record_boot_result, actions)
+        self.button("Prosegui con nuova ESP", self.preview_job_esp, actions)
         actions.addStretch()
         layout.addLayout(actions)
         self.job_table = QTableWidget(0, 4)
@@ -358,6 +359,10 @@ class Window(QMainWindow):
         self.button("Aggiorna diagnostica EFI", self.scan, actions, "primary")
         self.button("Piano ripristino della sola ESP selezionata", lambda: self.preview_boot_repair(), actions)
         self.button('Piano pulizia UUID assenti', lambda: self.preview_boot_repair(action='clean_boot'), actions)
+        initialization = QHBoxLayout()
+        layout.addLayout(initialization)
+        self.button('Inizializza nuova ESP dopo sostituzione disco',
+                    lambda: self.preview_boot_repair(action='initialize_esp'), initialization)
         actions.addStretch()
         layout.addLayout(actions)
         self.boot_table = QTableWidget(0, 8)
@@ -436,6 +441,23 @@ class Window(QMainWindow):
             self.tabs.setCurrentIndex(2)
             self.render_plan(plan)
         self.asynchronous(lambda: self.backend.rpc({"op": "plan", "request": request}), show, "Verifica del piano di ripristino della sola ESP…")
+
+    def preview_job_esp(self):
+        index = self.job_table.currentRow()
+        if not 0 <= index < len(self.jobs):
+            return
+        job = self.jobs[index]
+        if job.get('action') != 'replace' or job.get('role') not in {'BOOT', 'MISTO'}:
+            QMessageBox.information(self, 'Nuova ESP', 'Seleziona la sostituzione del disco del mirror di boot.')
+            return
+        self.invalidate_plan()
+        request = {'action': 'initialize_esp', 'pool_guid': job['pool_guid'],
+                   'target': job['target']['by_id'], 'replacement_id': job['id']}
+        def show(plan):
+            self.tabs.setCurrentIndex(2)
+            self.render_plan(plan)
+        self.asynchronous(lambda: self.backend.rpc({'op': 'plan', 'request': request}), show,
+                          'Verifica sostituzione e lettura integrale della nuova ESP…')
 
     def asynchronous(self, function, callback, label, retry=True):
         if self.busy:
@@ -905,6 +927,12 @@ class Window(QMainWindow):
         body += '<p>Nodo: ' + e((self.snapshot or {}).get('hostname', '?')) + ' · Pool GUID: ' + e(plan['pool_guid']) + '<br>Snapshot di sicurezza: ' + e(plan['fingerprint']) + '</p>'
         if plan.get('action') == 'clean_boot':
             body += '<h3>Pulizia del registro ESP: confermare che gli UUID assenti non appartengano a dischi temporaneamente scollegati.</h3>'
+        if plan.get('action') == 'initialize_esp':
+            evidence = plan.get('initialization_evidence', {})
+            body += '<h3>Inizializza nuova ESP dopo sostituzione disco</h3><p>Intervento ZFS: ' + e(str(plan.get('replacement_id') or 'non verificato'))
+            body += '<br>WWN: ' + e(plan['target'].get('wwn', '')) + '<br>PARTUUID: ' + e((plan.get('expected_esp') or {}).get('partuuid', ''))
+            body += '<br>Byte letti e verificati nulli: ' + str(evidence.get('blank', {}).get('bytes_read', 0)) + '</p>'
+            body += '<p><b>Richiede conferma esplicita della formattazione FAT32 della sola ESP.</b> Gli UUID assenti restano separati: ' + e(', '.join(plan.get('missing_uuids', [])) or 'nessuno') + '.</p>'
         if plan["blocks"]:
             body += "<h3 style='color:#f18c99'>Esecuzione bloccata</h3><ul>" + "".join("<li>" + e(b) + "</li>" for b in plan["blocks"]) + "</ul>"
         else:
@@ -930,6 +958,17 @@ class Window(QMainWindow):
             return
         request = {"op": "submit", "id": plan["id"], "approval_digest": plan["approval_digest"],
                    "serial_confirmation": serial.strip(), "backup_confirmed": True, "physical_confirmed": True}
+        if plan.get('action') == 'initialize_esp':
+            esp = plan['expected_esp']
+            message = ("Autorizzi la FORMATTAZIONE FAT32 della sola nuova ESP?"
+                       + "\nDisco: " + plan['target']['serial'] + "\nWWN: " + plan['target']['wwn']
+                       + "\nESP: " + esp['path'] + "\nPARTUUID: " + esp['partuuid']
+                       + "\nIl piano eseguirà format, init e refresh. La partizione ZFS è distinta.")
+            if QMessageBox.question(self, "Conferma formattazione nuova ESP", message,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+            request['format_partuuid_confirmation'] = esp['partuuid']
 
         def submitted(result):
             self.invalidate_plan()
@@ -946,7 +985,7 @@ class Window(QMainWindow):
             jobs = self.backend.rpc({"op": "list_jobs"})
             if isinstance(self.backend, SSHBackend) and self.backend.connection.read_only:
                 return jobs
-            states = {"MONITORING", "QUEUED", "RUNNING", "WAITING_RESILVER", "BOOT_REVIEW_REQUIRED", "BOOT_TEST_REQUIRED", "ZFS_REVIEW_REQUIRED"}
+            states = {"MONITORING", "QUEUED", "RUNNING", "WAITING_RESILVER", "BOOT_REVIEW_REQUIRED", "BOOT_TEST_REQUIRED", "BOOT_TEST_PENDING", "ESP_INITIALIZATION_REQUIRED", "ZFS_REVIEW_REQUIRED"}
             return [self.backend.rpc({"op": "status", "id": j["id"]}) if j.get("state") in states or (j.get("role") in {"BOOT", "MISTO"} and j.get("state") == "COMPLETED") else j for j in jobs if j.get("state") not in {"LED", "LED_FINISHED"}]
         self.asynchronous(get, self.render_jobs, "Recupero degli interventi persistenti sul nodo…")
 
@@ -986,6 +1025,8 @@ class Window(QMainWindow):
             body += "<p><b>" + e(job["result_message"]) + "</b></p>"
         if job.get("zfs_state"):
             body += "<p>ZFS: " + e(job["zfs_state"]) + " · resilver: " + e(job.get("resilver_state", "DA_VERIFICARE")) + "</p>"
+        if job.get('registry_cleanup', {}).get('state') == 'REQUIRED':
+            body += '<p><b>Pulizia UUID EFI separata richiesta:</b> ' + e(', '.join(job['registry_cleanup']['missing_uuids'])) + '. Usare Avvio EFI → Piano pulizia UUID assenti, poi aggiornare questo intervento.</p>'
         for disk in job.get("boot_validation", {}).get("disks", []):
             body += "<h4>EFI " + e(disk["serial"] or "membro assente") + "</h4><ul>"
             body += "".join("<li>" + e(name + ": " + c["state"] + " · " + c["detail"]) + "</li>" for name, c in disk["checks"].items()) + "</ul>"

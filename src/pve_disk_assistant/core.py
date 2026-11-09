@@ -268,6 +268,8 @@ def plan_replacement(snapshot, request):
             {'argv': ['proxmox-boot-tool', 'clean'], 'command': 'proxmox-boot-tool clean', 'phase': 'clean_boot', 'explanation': 'Rimuove dal registro i riferimenti alle ESP assenti: ' + ', '.join(missing) + '. Confermare che i dischi non siano temporaneamente scollegati.'},
             {'argv': ['proxmox-boot-tool', 'status'], 'command': 'proxmox-boot-tool status', 'phase': 'verify', 'explanation': 'Verifica il registro dopo la pulizia approvata.'}])
         return plan
+    if request.get("action") == "initialize_esp":
+        return plan_boot_repair(snapshot, request, initialize=True)
     if request.get("action") == "repair_boot":
         return plan_boot_repair(snapshot, request)
     blocks, warnings, steps = [], [], []
@@ -422,12 +424,9 @@ def plan_replacement(snapshot, request):
         "Sostituisce il membro nel vdev esistente e avvia il resilver, senza forzature.", "replace")
     if boot and source and steps and steps[0]["phase"] == "partition":
         esp_path = target["by_id"] + "-part" + str(esps[0]["number"])
-        add(["proxmox-boot-tool", "format", esp_path], "Formatta esclusivamente la nuova ESP.", "boot")
-        mode = next(iter(modes))
-        add(["proxmox-boot-tool", "init", esp_path] + (["grub"] if mode == "grub" else []),
-            "Inizializza il bootloader nella modalità rilevata sul membro sano.", "boot")
-        add(["proxmox-boot-tool", "refresh"], "Sincronizza tutte le ESP registrate dopo il resilver; non modifica partizioni ZFS.", "boot_refresh")
-        add(["proxmox-boot-tool", "status"], "Verifica le ESP; un test di avvio separato resta necessario.", "verify")
+        warnings.append("Dopo il resilver occorre approvare un piano distinto per inizializzare la nuova ESP; nessuna formattazione EFI automatica.")
+    else:
+        esp_path = None
     needed = {step["argv"][0] for step in steps}
     missing = needed - set(snapshot.get("tools", []))
     if missing:
@@ -436,6 +435,7 @@ def plan_replacement(snapshot, request):
             "pool": pool["name"], "pool_guid": pool["guid"], "role": pool.get("role"),
             "raid": raid_label(pool), "old_guid": old["guid"], "old_name": old["name"],
             "target": deepcopy(target), "source": deepcopy(source), "new_member": new_member,
+            "planned_esp_path": esp_path,
             "fingerprint": safety_fingerprint(snapshot), "topology_fingerprint": topology_fingerprint(pool), "steps": steps,
             "boot_id_before": snapshot.get("boot_id", ""),
             "boot_before": report if boot else None,
@@ -443,7 +443,7 @@ def plan_replacement(snapshot, request):
             "guests": pool.get("guests", [])}
 
 
-def plan_boot_repair(snapshot, request):
+def plan_boot_repair(snapshot, request, initialize=False):
     """Repair only the selected ESP; never recreate a healthy ZFS mirror."""
     from .boot import boot_report
     blocks, steps = [], []
@@ -463,6 +463,8 @@ def plan_boot_repair(snapshot, request):
         and all(disk_for_member(snapshot, m) is None and m['state'] in BAD for m in leaves(pool) if m is not member)
         and row.get('mode') in {'grub', 'systemd'}
         and all(row.get('checks', {}).get(k, {}).get('state') == 'OK' for k in ('fat32', 'filesystem', 'identity', 'registration', 'configuration')))
+    if initialize:
+        survivor_repair = False
     if survivor_repair:
         source_row, source = row, target
     groups = data_groups(pool)
@@ -497,17 +499,33 @@ def plan_boot_repair(snapshot, request):
         blocks.append("Secure Boot attivo: systemd-boot non viene inizializzato automaticamente.")
     path = target["by_id"] + "-part" + str(esp["number"]) if esp else ""
     info = snapshot.get("boot", {}).get("esps", {}).get(esp["path"], {}) if esp else {}
-    needs_format = info.get("probe_code") == 2 and info.get("signatures") == []
     if esp and (esp.get("mounts") or any(m.get("source") in [esp["path"], *esp.get("aliases", [])] for m in snapshot.get("mounts", []))):
         blocks.append("ESP selezionata montata: nessuno smontaggio o ripristino automatico.")
-    if not needs_format and (info.get("probe", {}).get("TYPE") != "vfat"
+    if not initialize and (info.get("probe", {}).get("TYPE") != "vfat"
                              or info.get("probe", {}).get("VERSION", "").upper() != "FAT32" or info.get("fsck_code") != 0):
-        blocks.append("ESP non vuota oppure FAT32 non coerente: nessuna formattazione o riparazione forzata.")
+        blocks.append("Il ripristino richiede una ESP FAT32 coerente. Per una nuova ESP usare 'Inizializza nuova ESP dopo sostituzione disco'; nessuna formattazione implicita.")
+    evidence = snapshot.get("esp_initialization", {}) if initialize else {}
+    if initialize:
+        if mode not in {"grub", "systemd"}:
+            blocks.append("Bootloader del membro di riferimento non verificato; nessuna migrazione implicita.")
+        if not evidence.get("replacement_id"):
+            blocks.append("Sostituzione precedente e PARTUUID non verificati nel registro del nodo.")
+        if evidence.get("error") or not evidence.get("blank", {}).get("all_zero"):
+            blocks.append(evidence.get("error") or "Assenza di dati non dimostrata: occorrono verifica delle firme e lettura integrale della ESP.")
+        if not target.get("wwn") or sum(d.get("wwn") == target.get("wwn") for d in snapshot["disks"]) != 1:
+            blocks.append("WWN del nuovo disco assente o non univoco: identità incompleta.")
+        zfs_parts = [p for p in target.get("partitions", []) if p.get("parttype", "").lower() == ZFS
+                     and member["name"] in [p["path"], *p.get("aliases", [])]]
+        if (not esp or esp.get("parttype", "").lower() != ESP or len(zfs_parts) != 1
+                or esp["path"] == zfs_parts[0]["path"] or target.get("holders")
+                or sum(p.get("partuuid", "").lower() == esp.get("partuuid", "").lower()
+                       for d in snapshot["disks"] for p in d.get("partitions", [])) != 1):
+            blocks.append("ESP e partizione ZFS non distinte in modo univoco, PARTUUID duplicato o dispositivi dipendenti presenti.")
 
     def add(argv, message, phase="boot"):
         steps.append({"argv": argv, "command": command_text(argv), "explanation": message, "phase": phase})
-    if needs_format and path:
-        add(["proxmox-boot-tool", "format", path], "Formatta SOLO l'ESP priva di firme del disco selezionato; non tocca GPT né ZFS.")
+    if initialize and path:
+        add(["proxmox-boot-tool", "format", path], "Crea FAT32 sulla sola nuova ESP, dopo verifica integrale e conferma esplicita; non modifica GPT o ZFS.")
     if mode != "unknown" and path:
         add(["proxmox-boot-tool", "init", path] + (["grub"] if mode == "grub" else []), "Ripristina il bootloader sulla sola ESP selezionata.")
         add(["proxmox-boot-tool", "refresh"], "Sincronizza kernel e configurazioni su tutte le ESP già registrate.", "boot_refresh")
@@ -515,13 +533,16 @@ def plan_boot_repair(snapshot, request):
     missing = {s["argv"][0] for s in steps} - set(snapshot.get("tools", []))
     if missing or not steps:
         blocks.append("Strumenti o modalità di ripristino mancanti: " + ", ".join(sorted(missing)))
-    return {"action": "repair_boot", "request": deepcopy(request), "host_id": snapshot.get("host_id"),
+    return {"action": "initialize_esp" if initialize else "repair_boot", "request": deepcopy(request), "host_id": snapshot.get("host_id"),
+        "initialization_evidence": deepcopy(evidence), "replacement_id": evidence.get("replacement_id"),
+        "missing_uuids": snapshot.get("boot", {}).get("missing_uuids", []),
         "pool": pool["name"], "pool_guid": pool["guid"], "role": pool["role"], "raid": raid_label(pool),
         "old_guid": member["guid"], "old_name": member["name"], "target": deepcopy(target), "source": deepcopy(source),
         "new_member": member["name"], "expected_esp": deepcopy(esp), "boot_before": report,
         "boot_id_before": snapshot.get("boot_id", ""), "fingerprint": safety_fingerprint(snapshot),
         "topology_fingerprint": topology_fingerprint(pool), "steps": steps, "blocks": blocks,
         "warnings": ["Ripristino della sola ESP: nessun sgdisk, zpool replace o grub-install generico.",
+                     "Gli UUID EFI assenti richiedono un piano separato di pulizia, dopo la verifica di entrambe le ESP.",
                      "La prova di avvio autonomo richiede una manutenzione e non è dedotta dai file EFI."],
         "guests": pool.get("guests", [])}
 

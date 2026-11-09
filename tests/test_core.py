@@ -169,9 +169,8 @@ def test_boot_plan_copies_in_the_correct_direction_and_chooses_bootloader(grub):
     args = [s["argv"] for s in result["steps"]]
     assert args[0] == ["sgdisk", "/dev/disk/by-id/ata-DEMO_BOOT_A", "-R", "/dev/disk/by-id/ata-DEMO_NEW"]
     assert ["zpool", "replace", "rpool", "102", "/dev/disk/by-id/ata-DEMO_NEW-part3"] in args
-    assert ["proxmox-boot-tool", "format", "/dev/disk/by-id/ata-DEMO_NEW-part2"] in args
-    init = next(a for a in args if a[:2] == ["proxmox-boot-tool", "init"])
-    assert (init[-1] == "grub") is grub
+    assert all(a[0] != "proxmox-boot-tool" for a in args)
+    assert result["planned_esp_path"] == "/dev/disk/by-id/ata-DEMO_NEW-part2"
 
 
 def test_unknown_bootloader_blocks_boot_modification():

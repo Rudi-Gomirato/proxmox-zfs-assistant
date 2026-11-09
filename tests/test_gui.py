@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 from pve_disk_assistant.demo import DemoBackend, snapshot
 from pve_disk_assistant.gui import STYLE, Window
 from copy import deepcopy
+from PySide6.QtWidgets import QMessageBox, QInputDialog, QPushButton
 
 
 @pytest.fixture(scope="module")
@@ -39,6 +40,38 @@ def test_gui_renders_both_topologies_and_preserves_approval_boundary(app, tmp_pa
     assert window.disk_table.rowCount() == 5
     assert window.tree.topLevelItem(1).child(0).childCount() == 3
     assert "RAIDZ1" in window.pool_combo.itemText(1)
+    window.close()
+
+
+@pytest.mark.parametrize("accept", [False, True])
+def test_new_esp_format_has_separate_explicit_confirmation(app, tmp_path, monkeypatch, accept):
+    from test_boot import repair_plan
+    window = Window(tmp_path, demo=False)
+    window.render_snapshot(snapshot())
+    monkeypatch.setattr(window, "is_demo", lambda: False)
+    plan = repair_plan()
+    plan.update(action="initialize_esp", blocks=[], id="a" * 32, approval_digest="test-approval")
+    plan["target"]["wwn"] = "synthetic-wwn"
+    window.render_plan(plan)
+    window.backup.setChecked(True)
+    window.physical.setChecked(True)
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a: (plan["target"]["serial"], True))
+    dialogs, sent = [], []
+    def confirm(*args):
+        dialogs.append(args)
+        return QMessageBox.StandardButton.Yes if accept else QMessageBox.StandardButton.No
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    window.backend = type("Backend", (), {"rpc": lambda self, req: sent.append(req)})()
+    monkeypatch.setattr(window, "asynchronous", lambda function, *a: function())
+    window.execute()
+    assert len(dialogs) == 1
+    assert plan["expected_esp"]["partuuid"] in dialogs[0][2]
+    assert "synthetic-wwn" in dialogs[0][2]
+    assert dialogs[0][-1] == QMessageBox.StandardButton.No
+    assert bool(sent) == accept
+    if accept:
+        assert sent[0]["format_partuuid_confirmation"] == plan["expected_esp"]["partuuid"]
+    assert any(b.text() == "Inizializza nuova ESP dopo sostituzione disco" for b in window.findChildren(QPushButton))
     window.close()
 
 

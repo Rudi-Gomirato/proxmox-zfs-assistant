@@ -1,5 +1,7 @@
 # Assistente desktop per la diagnosi e la sostituzione dei dischi ZFS in Proxmox
 
+> Aggiornamento 0.4.0: la nuova ESP richiede un piano distinto con conferma di formattazione; non riprende automaticamente dopo il resilver. Il ripristino delle ESP esistenti non formatta. Vedi la [procedura corrente](docs/nuova-esp.md).
+
 Aggiornamento 0.3.0: [comportamento attuale, estensioni e collaudo](docs/collaudo-0.3.md).
 Documento di progetto — versione 0.6 — 2 novembre 2026<br>
 Referente: Rudi Gomirato  

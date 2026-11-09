@@ -2,9 +2,9 @@
 
 App desktop Windows in Python per diagnosticare dischi e pool ZFS di Proxmox VE 8 e 9 e guidare la sostituzione dei membri guasti. Interfaccia in italiano, collegamento SSH e comandi spiegati prima dell'approvazione. Codice originale con [licenza MIT](LICENSE).
 
-**Versione 0.3.0 da collaudare in laboratorio.** GUI, motore e helper sono implementati e verificati con test automatici e dati sintetici. Non è ancora certificata la compatibilità con server, bootloader o LED reali. Leggi la [matrice di compatibilità](docs/compatibilita.md) prima di usare operazioni modificative.
+**Versione 0.4.0 da collaudare in laboratorio.** GUI, motore e helper sono implementati e verificati con test automatici e dati sintetici. Non è ancora certificata la compatibilità con server, bootloader o LED reali. Leggi la [matrice di compatibilità](docs/compatibilita.md) prima di usare operazioni modificative.
 
-**Aggiornamento da 0.1.0 / 0.2.0:** a interventi conclusi, usa **Installa / aggiorna helper sul nodo** dalla scheda Connessione e ripeti l'analisi. I piani richiedono app e helper della stessa versione. Le correzioni sono elencate nel [changelog](CHANGELOG.md).
+**Aggiornamento da versioni precedenti:** senza comandi attivi, usa **Installa / aggiorna helper sul nodo** dalla scheda Connessione e ripeti l'analisi. I piani richiedono app e helper della stessa versione. Le correzioni sono elencate nel [changelog](CHANGELOG.md).
 
 ![Panoramica con dati dimostrativi](docs/assets/panoramica.png)
 
@@ -14,7 +14,15 @@ In questa cartella esegui `avvia.cmd`. Se parti da un clone nuovo, installa Pyth
 
 Per il pacchetto compilato, estrai l'intero ZIP e avvia `ProxmoxZfsAssistant.exe`. Conserva tutte le librerie e le licenze della distribuzione.
 
-## Novità 0.3.0
+## Novità 0.4.0
+
+- **Inizializza nuova ESP dopo sostituzione disco**, accessibile anche dall'intervento ZFS: piano distinto e conferma esplicita della formattazione.
+- Verifica del registro della sostituzione, WWN, seriale e PARTUUID; lettura integrale della ESP, senza dedurre che sia vuota dal solo FSTYPE assente.
+- Ripristino di ESP esistenti senza format, gestione separata degli UUID assenti e stato **BOOT_TEST_PENDING** fino alle prove fisiche.
+
+[Procedura completa, aggiornamento e limiti](docs/nuova-esp.md).
+
+## Funzioni introdotte in 0.3.0
 
 - Refresh stabile: pool GUID, dischi, scheda e scorrimento conservati; nessun ripiego su un altro pool se il target scompare.
 - GRUB su ZFS: verifica delle entry e dei file nel dataset root; systemd-boot: verifica dei percorsi indicati nelle entry della ESP.

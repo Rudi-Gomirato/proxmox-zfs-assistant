@@ -15,7 +15,7 @@ def test_password_is_not_in_connection_repr():
 
 def test_helper_contains_only_standard_library_domain_and_node():
     with zipfile.ZipFile(io.BytesIO(helper_archive())) as archive:
-        assert set(archive.namelist()) == {"__main__.py", "pve_disk_assistant/__init__.py", "pve_disk_assistant/core.py", "pve_disk_assistant/node.py", "pve_disk_assistant/boot.py"}
+        assert set(archive.namelist()) == {"__main__.py", "pve_disk_assistant/__init__.py", "pve_disk_assistant/core.py", "pve_disk_assistant/node.py", "pve_disk_assistant/boot.py", "pve_disk_assistant/esp.py"}
         assert "paramiko" not in archive.read("pve_disk_assistant/node.py").decode()
 
 

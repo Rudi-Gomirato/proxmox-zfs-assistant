@@ -1,5 +1,14 @@
 # Modifiche
 
+## 0.4.0 — 9 novembre 2026
+
+- Separati ripristino FAT32 esistente e inizializzazione della nuova ESP dopo sostituzione. Nessun format nel ripristino e nessuna ripresa EFI automatica dopo il resilver.
+- Nuovo piano da Avvio EFI o dall'intervento ZFS: prova di provenienza nel registro root del nodo, WWN/seriale/PARTUUID, resilver concluso, distinzione ESP/ZFS, verifica firme e lettura integrale di tutti i byte.
+- Riconosciuto il risultato blkid con soli metadati GPT; dati non nulli o esiti incerti mantengono il blocco. Conferma esplicita di format vincolata al PARTUUID, oltre al seriale.
+- FAT32 e UUID verificati prima di init, GRUB mantenuto quando rilevato sul riferimento, refresh esplicito e diagnostica finale. Pulizia vecchi UUID separata e BOOT_TEST_PENDING fino alle prove fisiche.
+- Registro padre/figlio per recuperare la fase EFI senza ripetere GPT/replace, controlli ripetuti prima delle scritture e nessun replay dopo errori.
+- Nuove regressioni sintetiche e guida [nuova ESP](docs/nuova-esp.md); collaudo su hardware reale ancora necessario.
+
 ## 0.3.0 — 9 novembre 2026
 
 - Chiusura esplicita delle finestre Qt e dei timer; teardown dei test prima della finalizzazione Python. Vincolo PySide6 6.10.3 su Linux/Python < 3.12 per l'arresto nativo `none_dealloc` osservato con 6.12.0 dopo i test; Windows e Python >= 3.12 mantengono 6.12.0.

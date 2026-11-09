@@ -1,5 +1,7 @@
 # Versione 0.3.0: aggiornamento e collaudo
 
+> Aggiornamento 0.4.0: la nuova ESP richiede un piano distinto con conferma di formattazione; non riprende automaticamente dopo il resilver. Il ripristino delle ESP esistenti non formatta. Vedi la [procedura corrente](nuova-esp.md).
+
 Aggiornare app e helper dalla scheda Connessione a interventi conclusi. La compatibilità di versione è verificata prima dei piani. Il codice è verificato con fixture sintetiche e GUI Windows; le correzioni non attestano un collaudo sul server reale.
 
 ## Percorso del laboratorio

@@ -152,11 +152,13 @@ def test_missing_boot_observations_never_certify_boot():
 
 
 def test_esp_only_repair_never_repartitions_or_replaces_zfs():
-    plan = repair_plan()
+    snapshot = inventory()
+    demo.add_boot_observations(snapshot, "grub")
+    plan = repair_plan(snapshot)
     assert plan["blocks"] == []
     assert plan["action"] == "repair_boot"
     assert all(s["argv"][0] == "proxmox-boot-tool" for s in plan["steps"])
-    assert plan["steps"][0]["argv"] == ["proxmox-boot-tool", "format", "/dev/disk/by-id/ata-DEMO_BOOT_A-part2"]
+    assert all(s["argv"][:2] != ["proxmox-boot-tool", "format"] for s in plan["steps"])
     assert ["proxmox-boot-tool", "init", "/dev/disk/by-id/ata-DEMO_BOOT_A-part2", "grub"] in [s["argv"] for s in plan["steps"]]
     assert ["proxmox-boot-tool", "refresh"] in [s["argv"] for s in plan["steps"]]
     assert not any("-part3" in s["command"] for s in plan["steps"])
@@ -202,20 +204,12 @@ def test_live_esp_binding_blocks_changed_identity_wrong_type_or_mount(monkeypatc
         node.bind_esp(plan)
 
 
-def test_live_format_guard_blocks_filesystem_created_after_approval(monkeypatch):
+def test_old_repair_plan_cannot_authorize_format(monkeypatch):
     plan = repair_plan()
-    step = next(s for s in plan["steps"] if s["argv"][:2] == ["proxmox-boot-tool", "format"])
-    monkeypatch.setattr(node, "bind_esp", lambda p: p.update(expected_esp={"path": step["argv"][2]}))
-    calls = []
-
-    def probe(argv):
-        calls.append(argv)
-        return {"code": 0, "out": "TYPE=vfat\n" if argv[0] == "blkid" else json.dumps({"signatures": [{"type": "vfat"}]}), "err": ""}
-
-    monkeypatch.setattr(node, "run", probe)
-    with pytest.raises(core.SafetyError, match="formattazione annullata"):
+    step = {"phase": "boot", "argv": ["proxmox-boot-tool", "format", "/dev/sda2"]}
+    monkeypatch.setattr(node, "bind_esp", lambda p: p.update(expected_esp={"path": "/dev/sda2"}))
+    with pytest.raises(core.SafetyError, match="piano distinto"):
         node.verify_boot_write(plan, step)
-    assert [c[0] for c in calls] == ["blkid", "wipefs"]
 
 
 @pytest.fixture
@@ -248,7 +242,7 @@ def test_boot_never_becomes_completed_from_online_mirror_alone(journal, monkeypa
     monkeypatch.setattr(node, "collect", lambda: snapshot)
     result = node.get_status(plan["id"])
     assert result["zfs_state"] == "OK"
-    assert result["state"] == ("BOOT_REVIEW_REQUIRED" if damage else "BOOT_TEST_REQUIRED")
+    assert result["state"] == ("BOOT_REVIEW_REQUIRED" if damage else "BOOT_TEST_PENDING")
     assert result["boot_test"] == "NON_TESTATO_COMPLETAMENTE"
 
 
@@ -257,7 +251,7 @@ def test_legacy_completed_boot_job_is_reassessed(journal, monkeypatch):
     plan.pop("helper_version")
     node.save_record(plan)
     monkeypatch.setattr(node, "collect", rebuilt)
-    assert node.get_status(plan["id"])["state"] == "BOOT_TEST_REQUIRED"
+    assert node.get_status(plan["id"])["state"] == "BOOT_TEST_PENDING"
 
 
 def test_boot_commands_wait_for_resilver_and_cursor_prevents_replaying_replace(journal, monkeypatch):
@@ -269,15 +263,14 @@ def test_boot_commands_wait_for_resilver_and_cursor_prevents_replaying_replace(j
     assert waiting["state"] == "WAITING_RESILVER"
     assert calls[-1][0:2] == ["zpool", "replace"]
     assert all(c[0] != "proxmox-boot-tool" for c in calls)
-    assert waiting["steps"][waiting["next_step"]]["argv"][:2] == ["proxmox-boot-tool", "format"]
+    assert waiting["next_step"] == len(waiting["steps"])
     monkeypatch.setattr(node, "collect", rebuilt)
-    monkeypatch.setattr(node, "spawn_worker", lambda *a: 123)
-    queued = node.get_status(plan["id"])
-    assert queued["state"] == "QUEUED" and queued["execution_phase"] == "boot"
-    monkeypatch.setattr(node, "verify_boot_write", lambda *a: None)
+    monkeypatch.setattr(node, "spawn_worker", lambda *a: pytest.fail("Must require a new approval"))
+    pending = node.get_status(plan["id"])
+    assert pending["state"] == "ESP_INITIALIZATION_REQUIRED"
     node.perform_job(plan["id"])
     assert sum(c[:2] == ["zpool", "replace"] for c in calls) == 1
-    assert ["proxmox-boot-tool", "refresh"] in calls
+    assert all(c[0] != "proxmox-boot-tool" for c in calls)
 
 
 def test_post_resilver_failure_of_source_boot_prevents_esp_writes(journal, monkeypatch):
@@ -358,4 +351,4 @@ def test_boot_proof_no_longer_applies_after_efi_contents_change(journal, monkeyp
     changed = rebuilt()
     changed["boot"]["esps"]["/dev/sda2"]["files"][0]["sha256"] = "changed-efi-binary"
     monkeypatch.setattr(node, "collect", lambda: changed)
-    assert node.get_status(plan["id"])["state"] == "BOOT_TEST_REQUIRED"
+    assert node.get_status(plan["id"])["state"] == "BOOT_TEST_PENDING"
