@@ -2,7 +2,7 @@
 
 ## 0.3.0 — 9 novembre 2026
 
-- Chiusura esplicita delle finestre Qt e dei timer; teardown dei test prima della finalizzazione Python, per evitare l'arresto nativo rilevato in CI Linux dopo i test.
+- Chiusura esplicita delle finestre Qt e dei timer; teardown dei test prima della finalizzazione Python. Vincolo PySide6 6.10.3 su Linux/Python < 3.12 per l'arresto nativo `none_dealloc` osservato con 6.12.0 dopo i test; Windows e Python >= 3.12 mantengono 6.12.0.
 
 - Corretto il cambio automatico del pool: selezioni stabili, nessun fallback, nessun cambio da richieste di chiarimento RAID; controlli del target congelati durante le richieste SSH.
 - Ignorati snapshot precedenti; piani conservati se il fingerprint di sicurezza è invariato, con ordine degli elementi normalizzato. Cambiamenti reali richiedono nuova approvazione.

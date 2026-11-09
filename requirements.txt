@@ -1,2 +1,3 @@
-PySide6-Essentials==6.12.0
+PySide6-Essentials==6.12.0; sys_platform != 'linux' or python_version >= '3.12'
+PySide6-Essentials==6.10.3; sys_platform == 'linux' and python_version < '3.12'
 paramiko==5.1.0
