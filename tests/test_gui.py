@@ -28,6 +28,43 @@ def app():
     gc.collect()
 
 
+def test_sidebar_and_collapsible_details_preserve_selected_workflow(app, tmp_path):
+    window = Window(tmp_path, demo=False)
+    window.backend = DemoBackend()
+    window.render_snapshot(snapshot())
+    window.navigation.setCurrentRow(3)
+    assert window.tabs.currentIndex() == 3
+    window.tabs.setCurrentIndex(5)
+    assert window.navigation.currentRow() == 5
+    assert not window.continue_esp_button.isEnabled()
+    job = {"id": "synthetic-job", "pool": "rpool", "role": "BOOT", "action": "replace",
+           "state": "ESP_INITIALIZATION_REQUIRED", "events": [{"command": "synthetic <command>", "state": "OK"}]}
+    window.render_jobs([job])
+    assert window.continue_esp_button.isEnabled()
+    panel = window.job_details_panel
+    assert window.job_detail.isHidden()
+    assert panel.maximumHeight() == panel.toggle.sizeHint().height()
+    panel.toggle.setChecked(True)
+    assert not window.job_detail.isHidden()
+    assert "synthetic <command>" in window.job_detail.toPlainText()
+    window.render_jobs([{**job, "state": "FAILED"}])
+    assert not window.continue_esp_button.isEnabled()
+    from pve_disk_assistant.ui_theme import color_for
+    assert window.job_table.item(0, 3).foreground().color() == color_for("FAILED")
+    assert "Non ripetere" in window.job_notice.description.text()
+    assert panel.toggle.isChecked()
+    window.busy = True
+    window.continue_esp_button.setEnabled(False)
+    window.render_jobs([job])
+    assert not window.continue_esp_button.isEnabled()
+    window.busy = False
+    window.render_jobs([{**job, "id": "different-job"}])
+    assert not window.continue_esp_button.isEnabled()
+    assert window.job_detail.toPlainText() == ""
+    assert window.job_notice.title.text() == "Seleziona un intervento"
+    window.close()
+
+
 def test_gui_renders_both_topologies_and_preserves_approval_boundary(app, tmp_path):
     window = Window(tmp_path, demo=False)
     window.backend = DemoBackend()

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
     QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QPlainTextEdit,
     QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
-    QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QProgressBar)
+    QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QProgressBar, QListWidget)
 
 from . import __version__
 from .boot import boot_report
@@ -26,46 +26,16 @@ from .demo import DemoBackend
 from .store import Store
 from .transport import Connection, HostVerificationRequired, SSHBackend
 
-STYLE = """
-QWidget { background:#0e1523; color:#d9e4f5; font-family:'Segoe UI'; font-size:10pt; }
-QMainWindow { background:#0e1523; }
-QLabel#title { font-size:24pt; font-weight:700; color:#f4f8ff; }
-QLabel#subtitle { color:#96a9c6; font-size:11pt; }
-QLabel#badge { color:#6fdec5; background:#152b35; padding:7px 12px; border-radius:8px; }
-QFrame#card { background:#172235; border:1px solid #26354d; border-radius:12px; }
-QFrame#card QLabel { background:transparent; }
-QLabel#metric { font-size:22pt; font-weight:700; }
-QLabel#muted { color:#96a9c6; }
-QTabWidget::pane { border:1px solid #26354d; border-radius:8px; }
-QTabBar::tab { background:#172235; padding:12px 20px; margin-right:4px; }
-QTabBar::tab:selected { background:#253b51; color:#7ce4ce; }
-QGroupBox { border:1px solid #2c3d56; border-radius:8px; margin-top:12px; padding:15px; }
-QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 6px; color:#b5c8e3; }
-QPushButton { background:#263b53; border:1px solid #3b526f; border-radius:6px; padding:8px 13px; }
-QPushButton:hover { background:#34516e; }
-QPushButton:disabled { color:#64758c; background:#172235; border-color:#26354d; }
-QPushButton#primary { background:#177c6a; color:white; border-color:#269780; font-weight:600; }
-QPushButton#danger { background:#753d47; border-color:#a25a65; }
-QLineEdit, QSpinBox, QComboBox { background:#111d2e; border:1px solid #34465f; border-radius:5px; padding:7px; }
-QTreeWidget, QTableWidget, QPlainTextEdit, QTextBrowser { background:#111c2c; border:1px solid #293a52; border-radius:5px; }
-QTreeWidget::item, QTableWidget::item { padding:7px; }
-QTreeWidget::item:selected, QTableWidget::item:selected { background:#244a60; }
-QHeaderView::section { background:#1e2d43; color:#a8bdd9; padding:8px; border:0; }
-QTextBrowser { padding:10px; }
-QCheckBox { spacing:8px; }
-QStatusBar { background:#172235; }
-QSplitter::handle { background:#26354d; width:5px; }
-"""
+from .ui_theme import STYLE, color_for
+from .ui_widgets import SectionStack, ProcedureNotice, DetailsPanel
+from .presentation import plan_html, job_html
+from .workflow import ACTIVE_STATES, next_step, state_label, should_refresh
 
 
 def size_text(size):
     return f"{size / 1_000_000_000:,.1f} GB" if size else "—"
 
 
-def color_for(state):
-    return QColor("#71d7b3" if state in GOOD | {"COMPLETED", "OK"} else
-                  "#f4bf65" if state in {"DEGRADED", "MONITORING", "RUNNING", "QUEUED", "WAITING_RESILVER", "BOOT_TEST_REQUIRED", "BOOT_TEST_PENDING", "ESP_INITIALIZATION_REQUIRED"} else
-                  "#f18c99" if state in BAD | {"FAILED", "UNKNOWN", "BLOCKED", "ERROR", "BOOT_REVIEW_REQUIRED", "ZFS_REVIEW_REQUIRED"} else "#b9cce6")
 
 
 class Worker(QThread):
@@ -124,13 +94,40 @@ class Window(QMainWindow):
 
     def _build(self):
         central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(24, 20, 24, 16)
+        shell = QHBoxLayout(central)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(190)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(14, 24, 14, 18)
+        brand = QLabel("PROXMOX\nZFS Assistant")
+        brand.setObjectName("brand")
+        side.addWidget(brand)
+        version = QLabel("Desktop · " + __version__)
+        version.setObjectName("muted")
+        side.addWidget(version)
+        side.addSpacing(24)
+        self.navigation = QListWidget()
+        self.navigation.setObjectName("navigation")
+        self.navigation.setAccessibleName("Sezioni dell'assistente")
+        self.navigation.addItems(["Panoramica", "Dischi e diagnosi", "Sostituzione", "Interventi", "Connessione", "Avvio EFI"])
+        side.addWidget(self.navigation, 1)
+        footer = QLabel("Proxmox VE 8 / 9\nComandi spiegati,\nmodifiche approvate.")
+        footer.setObjectName("muted")
+        side.addWidget(footer)
+        shell.addWidget(sidebar)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(22, 20, 22, 12)
+        layout.setSpacing(12)
+        shell.addWidget(content, 1)
         header = QHBoxLayout()
         titles = QVBoxLayout()
-        title = QLabel("Proxmox ZFS Assistant")
+        title = QLabel("Panoramica")
         title.setObjectName("title")
-        subtitle = QLabel("Diagnosi dei dischi  /  Topologia ZFS  /  Sostituzione guidata")
+        subtitle = QLabel("Analizza il nodo, verifica i dischi e segui l'intervento.")
         subtitle.setObjectName("subtitle")
         titles.addWidget(title)
         titles.addWidget(subtitle)
@@ -143,7 +140,7 @@ class Window(QMainWindow):
         self.freshness = QLabel("Pronto. Carica la demo oppure configura una connessione SSH.")
         self.freshness.setObjectName("muted")
         layout.addWidget(self.freshness)
-        self.tabs = QTabWidget()
+        self.tabs = SectionStack()
         layout.addWidget(self.tabs, 1)
         self._overview()
         self._disks()
@@ -151,6 +148,16 @@ class Window(QMainWindow):
         self._jobs()
         self._connection()
         self._boot_diagnostics()
+        self.navigation.currentRowChanged.connect(self.tabs.setCurrentIndex)
+        self.tabs.currentChanged.connect(self.navigation.setCurrentRow)
+        self.tabs.currentChanged.connect(lambda i: title.setText(self.navigation.item(i).text()) if i >= 0 else None)
+        self.navigation.setCurrentRow(0)
+        for table in (self.disk_table, self.boot_table, self.job_table):
+            table.setAlternatingRowColors(True)
+            table.setShowGrid(False)
+            table.verticalHeader().hide()
+        self.tree.setAlternatingRowColors(True)
+        self.update_action_states()
         self.setCentralWidget(central)
         self.statusBar().showMessage("Versione " + __version__ + " · progetto indipendente da Proxmox")
 
@@ -169,6 +176,12 @@ class Window(QMainWindow):
         self.button("Carica demo", self.load_demo, actions)
         self.button("Esporta rapporto anonimizzato", self.export_report, actions, network=False)
         layout.addLayout(actions)
+        shortcuts = QHBoxLayout()
+        self.button("Prepara sostituzione", lambda: self.tabs.setCurrentIndex(2), shortcuts, network=False)
+        self.button("Controlla avvio EFI", lambda: self.tabs.setCurrentIndex(5), shortcuts, network=False)
+        self.button("Segui interventi", lambda: self.tabs.setCurrentIndex(3), shortcuts, network=False)
+        shortcuts.addStretch()
+        layout.addLayout(shortcuts)
         cards = QHBoxLayout()
         self.card_values = {}
         for label, key in (("POOL RILEVATI", "pools"), ("DISCHI PRESENTI", "disks"),
@@ -187,9 +200,10 @@ class Window(QMainWindow):
         split = QSplitter()
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Pool / vdev / membro", "Ruolo o tipo", "Stato", "GUID"])
-        self.tree.setMinimumWidth(610)
+        self.tree.setMinimumWidth(360)
         self.tree.itemSelectionChanged.connect(self.tree_selected)
         self.detail = QTextBrowser()
+        self.detail.setPlaceholderText("Seleziona un pool, un vdev o un disco per leggere i dettagli.")
         split.addWidget(self.tree)
         split.addWidget(self.detail)
         split.setSizes([820, 460])
@@ -224,6 +238,9 @@ class Window(QMainWindow):
     def _replacement(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        self.plan_notice = ProcedureNotice("1 · Identifica i dischi", "Seleziona il pool, il membro guasto e il ricambio. Generare il piano non esegue comandi modificativi.",
+                                           "Analisi → Selezione → Controlli e piano → Approvazione → Intervento")
+        layout.addWidget(self.plan_notice)
         form_group = QGroupBox("Selezione verificata")
         form = QFormLayout(form_group)
         self.pool_combo, self.old_combo, self.target_combo = QComboBox(), QComboBox(), QComboBox()
@@ -252,7 +269,7 @@ class Window(QMainWindow):
         self.plan_view = QTextBrowser()
         self.plan_view.setPlaceholderText("Seleziona pool, membro guasto e nuovo disco. Nessuna modifica parte dall'anteprima.")
         layout.addWidget(self.plan_view, 1)
-        approval = QHBoxLayout()
+        approval = QVBoxLayout()
         self.backup = QCheckBox("Backup verificato e manutenzione concordata")
         self.physical = QCheckBox("Identità e posizione del nuovo disco verificate")
         approval.addWidget(self.backup)
@@ -268,9 +285,13 @@ class Window(QMainWindow):
         actions = QHBoxLayout()
         self.button("Recupera interventi dal nodo", self.refresh_jobs, actions)
         self.button("Registra prova di avvio autonomo", self.record_boot_result, actions)
-        self.button("Prosegui con nuova ESP", self.preview_job_esp, actions)
+        self.continue_esp_button = self.button("Prosegui con nuova ESP", self.preview_job_esp, actions, "primary")
+        self.continue_esp_button.setEnabled(False)
         actions.addStretch()
         layout.addLayout(actions)
+        self.job_notice = ProcedureNotice("Seleziona un intervento", "Recupera gli interventi dal nodo per vedere il passaggio corrente e la prossima azione.",
+                                          "Preparazione → Ricostruzione ZFS → Configurazione EFI → Prove di avvio")
+        layout.addWidget(self.job_notice)
         self.job_table = QTableWidget(0, 4)
         self.job_table.setHorizontalHeaderLabels(["Intervento", "Pool", "Destinazione", "Stato"])
         self.job_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -279,7 +300,8 @@ class Window(QMainWindow):
         self.job_table.itemSelectionChanged.connect(self.job_selected)
         layout.addWidget(self.job_table)
         self.job_detail = QTextBrowser()
-        layout.addWidget(self.job_detail, 1)
+        self.job_details_panel = DetailsPanel("Mostra comandi, esiti e verifiche tecniche", self.job_detail)
+        layout.addWidget(self.job_details_panel, 1)
         self.job_progress = QProgressBar()
         self.job_progress.setRange(0, 100)
         self.job_progress.setFormat("Resilver · %p% (stima)")
@@ -329,9 +351,12 @@ class Window(QMainWindow):
         self.server_profiles = QComboBox()
         self.server_profiles.addItems(sorted(self.store.get('profiles', {})))
         form.addRow('Profilo cliente / nodo / ambiente', self.server_profiles)
-        self.button('Salva profilo', self.save_profile, outer, network=False)
-        self.button('Carica profilo', self.load_profile, outer, network=False)
         outer.addWidget(group)
+        profiles = QHBoxLayout()
+        self.button('Salva profilo', self.save_profile, profiles, network=False)
+        self.button('Carica profilo', self.load_profile, profiles, network=False)
+        profiles.addStretch()
+        outer.addLayout(profiles)
         buttons = QHBoxLayout()
         self.button("Collega e analizza", self.connect_live, buttons, "primary")
         self.button("Installa / aggiorna helper sul nodo", self.install_helper, buttons)
@@ -352,17 +377,16 @@ class Window(QMainWindow):
     def _boot_diagnostics(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        text = QLabel("ZFS ONLINE non certifica il boot. Ogni ESP è controllata separatamente; l'avvio autonomo richiede una prova fisica a PC spento durante il cambio dischi.")
-        text.setWordWrap(True)
-        layout.addWidget(text)
+        self.boot_notice = ProcedureNotice("Verifica l'avvio, separatamente da ZFS", "Seleziona il disco. Usa la nuova ESP dopo una sostituzione, oppure ripristina una FAT32 esistente. I piani richiedono approvazione.")
+        layout.addWidget(self.boot_notice)
         actions = QHBoxLayout()
         self.button("Aggiorna diagnostica EFI", self.scan, actions, "primary")
-        self.button("Piano ripristino della sola ESP selezionata", lambda: self.preview_boot_repair(), actions)
-        self.button('Piano pulizia UUID assenti', lambda: self.preview_boot_repair(action='clean_boot'), actions)
+        self.repair_esp_button = self.button("Piano ripristino della sola ESP selezionata", lambda: self.preview_boot_repair(), actions)
+        self.clean_esp_button = self.button('Piano pulizia UUID assenti', lambda: self.preview_boot_repair(action='clean_boot'), actions)
         initialization = QHBoxLayout()
         layout.addLayout(initialization)
-        self.button('Inizializza nuova ESP dopo sostituzione disco',
-                    lambda: self.preview_boot_repair(action='initialize_esp'), initialization)
+        self.initialize_esp_button = self.button('Inizializza nuova ESP dopo sostituzione disco',
+                    lambda: self.preview_boot_repair(action='initialize_esp'), initialization, 'primary')
         actions.addStretch()
         layout.addLayout(actions)
         self.boot_table = QTableWidget(0, 8)
@@ -377,6 +401,23 @@ class Window(QMainWindow):
         self.boot_detail = QTextBrowser()
         layout.addWidget(self.boot_detail, 1)
         self.tabs.addTab(tab, "Avvio EFI")
+
+    def update_action_states(self):
+        if self.busy:
+            return
+        index = self.job_table.currentRow()
+        job = self.jobs[index] if 0 <= index < len(self.jobs) else {}
+        can_continue = (job.get('action') == 'replace' and job.get('role') in {'BOOT', 'MISTO'}
+                        and job.get('state') in {'ESP_INITIALIZATION_REQUIRED', 'BOOT_REVIEW_REQUIRED'})
+        self.continue_esp_button.setEnabled(can_continue)
+        self.continue_esp_button.setToolTip('Prepara il piano EFI del ricambio selezionato.' if can_continue else
+            'Seleziona una sostituzione di boot con ZFS ricostruito e fase EFI da completare. Aggiorna prima lo stato del nodo.')
+        index = self.boot_table.currentRow()
+        row = self.boot_rows[index]['disk'] if 0 <= index < len(self.boot_rows) else {}
+        present = bool(row.get('by_id'))
+        for button in (self.initialize_esp_button, self.repair_esp_button, self.clean_esp_button):
+            button.setEnabled(present)
+            button.setToolTip('Il nodo rivalida tutti i prerequisiti prima dell’approvazione.' if present else 'Seleziona un disco fisico identificato nella tabella EFI.')
 
     def render_boot(self):
         self.boot_rows = []
@@ -409,10 +450,14 @@ class Window(QMainWindow):
             self.boot_selected()
         else:
             self.boot_detail.clear()
+            self.boot_notice.title.setText('Nessun disco di boot identificato')
+            self.boot_notice.description.setText('Aggiorna la diagnostica. Non viene selezionato un disco alternativo automaticamente.')
+            self.update_action_states()
 
     def boot_selected(self):
         index = self.boot_table.currentRow()
         if index < 0 or index >= len(self.boot_rows):
+            self.update_action_states()
             return
         entry = self.boot_rows[index]
         disk = entry["disk"]
@@ -425,6 +470,9 @@ class Window(QMainWindow):
             body += "<p>Avvisi registro ESP: " + e("; ".join(entry["report"]["warnings"])) + "</p>"
         body += "<p><b>Avvio autonomo: NON TESTATO.</b> Configurazione e file non provano che il firmware avvierà il disco. Secure Boot: firme non certificate dall'app.</p>"
         self.boot_detail.setHtml(body)
+        self.boot_notice.title.setText("Disco: " + (disk['serial'] or 'non identificato'))
+        self.boot_notice.description.setText("ESP esistente: usa il ripristino se FAT32 è coerente. Nuovo ricambio: usa l'inizializzazione con conferma di format. ZFS ONLINE non certifica il boot.")
+        self.update_action_states()
 
     def preview_boot_repair(self, action='repair_boot'):
         index = self.boot_table.currentRow()
@@ -496,6 +544,8 @@ class Window(QMainWindow):
             for button in self.network_buttons:
                 button.setEnabled(True)
             self.execute_button.setEnabled(bool(self.plan and not self.plan.get('read_only') and not self.plan["blocks"] and not self.is_demo()))
+            self.hot_swap.setEnabled(self.profile.currentIndex() == 1)
+            self.update_action_states()
             worker.deleteLater()
             self.worker = None
 
@@ -772,6 +822,8 @@ class Window(QMainWindow):
             self.plan_view.clear()
             self.backup.setChecked(False)
             self.physical.setChecked(False)
+            self.plan_notice.title.setText('1 · Identifica i dischi')
+            self.plan_notice.description.setText('Seleziona il pool, il membro guasto e il ricambio. Genera un nuovo piano per verificare i prerequisiti.')
 
     def profile_changed(self, *_):
         production = self.profile.currentIndex() == 1
@@ -919,29 +971,12 @@ class Window(QMainWindow):
 
     def render_plan(self, plan):
         self.plan = plan
-        e = html.escape
-        label = "Disco da escludere" if plan.get("action") == "offline" else "Disco di cui ripristinare SOLO l'ESP" if plan.get("action") in {"repair_boot", "clean_boot"} else "Nuovo disco"
+        self.plan_notice.title.setText("Controlli non superati" if plan['blocks'] else "Piano pronto · approvazione richiesta")
+        self.plan_notice.description.setText("Correggi le condizioni indicate nel piano e ripeti la verifica. Nessun comando è stato eseguito." if plan['blocks'] else
+            "Leggi destinazione e comandi, conferma backup e identità del disco, poi approva. La nuova ESP richiede anche la conferma di formattazione.")
         self.physical.setText("Identità e posizione del disco da escludere verificate" if plan.get("action") == "offline" else
                               "Identità del disco e della sola ESP da ripristinare verificate" if plan.get("action") in {"repair_boot", "clean_boot"} else "Identità e posizione del nuovo disco verificate")
-        body = f"<h2>{e(plan['pool'])} · {e(plan['role'])}</h2><p>{e(plan['raid'])}<br>{label}: <b>{e(plan['target']['serial'])}</b> · {e(plan['target']['by_id'])}</p>"
-        body += '<p>Nodo: ' + e((self.snapshot or {}).get('hostname', '?')) + ' · Pool GUID: ' + e(plan['pool_guid']) + '<br>Snapshot di sicurezza: ' + e(plan['fingerprint']) + '</p>'
-        if plan.get('action') == 'clean_boot':
-            body += '<h3>Pulizia del registro ESP: confermare che gli UUID assenti non appartengano a dischi temporaneamente scollegati.</h3>'
-        if plan.get('action') == 'initialize_esp':
-            evidence = plan.get('initialization_evidence', {})
-            body += '<h3>Inizializza nuova ESP dopo sostituzione disco</h3><p>Intervento ZFS: ' + e(str(plan.get('replacement_id') or 'non verificato'))
-            body += '<br>WWN: ' + e(plan['target'].get('wwn', '')) + '<br>PARTUUID: ' + e((plan.get('expected_esp') or {}).get('partuuid', ''))
-            body += '<br>Byte letti e verificati nulli: ' + str(evidence.get('blank', {}).get('bytes_read', 0)) + '</p>'
-            body += '<p><b>Richiede conferma esplicita della formattazione FAT32 della sola ESP.</b> Gli UUID assenti restano separati: ' + e(', '.join(plan.get('missing_uuids', [])) or 'nessuno') + '.</p>'
-        if plan["blocks"]:
-            body += "<h3 style='color:#f18c99'>Esecuzione bloccata</h3><ul>" + "".join("<li>" + e(b) + "</li>" for b in plan["blocks"]) + "</ul>"
-        else:
-            body += "<h3 style='color:#71d7b3'>Prerequisiti verificati · approvazione richiesta</h3>"
-        body += "<ol>" + "".join(f"<li><pre>{e(s['command'])}</pre><p>{e(s['explanation'])}</p></li>" for s in plan["steps"]) + "</ol>"
-        body += "<h3>Note</h3><ul>" + "".join("<li>" + e(w) + "</li>" for w in plan["warnings"]) + "</ul>"
-        body += "<p>Anteprima con controlli di sola lettura, non una simulazione nativa universale. Validità: dieci minuti e solo con inventario invariato.</p>"
-        if plan.get("role") in {"BOOT", "MISTO"} and plan.get("action") != "offline":
-            body += "<p><b>Esito boot separato da ZFS.</b> In una sostituzione la fase EFI attende il resilver. Il completamento richiede configurazione EFI di entrambi i membri e prove di avvio autonomo distinte.</p>"
+        body = plan_html(plan, (self.snapshot or {}).get('hostname', '?'))
         self.plan_view.setHtml(body)
         self.execute_button.setEnabled(not plan["blocks"] and not plan.get('read_only') and not self.is_demo())
 
@@ -985,8 +1020,7 @@ class Window(QMainWindow):
             jobs = self.backend.rpc({"op": "list_jobs"})
             if isinstance(self.backend, SSHBackend) and self.backend.connection.read_only:
                 return jobs
-            states = {"MONITORING", "QUEUED", "RUNNING", "WAITING_RESILVER", "BOOT_REVIEW_REQUIRED", "BOOT_TEST_REQUIRED", "BOOT_TEST_PENDING", "ESP_INITIALIZATION_REQUIRED", "ZFS_REVIEW_REQUIRED"}
-            return [self.backend.rpc({"op": "status", "id": j["id"]}) if j.get("state") in states or (j.get("role") in {"BOOT", "MISTO"} and j.get("state") == "COMPLETED") else j for j in jobs if j.get("state") not in {"LED", "LED_FINISHED"}]
+            return [self.backend.rpc({"op": "status", "id": j["id"]}) if should_refresh(j) else j for j in jobs if j.get("state") not in {"LED", "LED_FINISHED"}]
         self.asynchronous(get, self.render_jobs, "Recupero degli interventi persistenti sul nodo…")
 
     def render_jobs(self, jobs):
@@ -994,51 +1028,49 @@ class Window(QMainWindow):
             self.store.set('jobs:' + self.snapshot['host_id'], jobs)
         selected_id = self.jobs[self.job_table.currentRow()]['id'] if 0 <= self.job_table.currentRow() < len(self.jobs) else None
         self.jobs = list(reversed(jobs))
+        self.job_table.blockSignals(True)
         self.job_table.setRowCount(len(self.jobs))
         for row, job in enumerate(self.jobs):
-            for col, val in enumerate((job["id"][:12], job.get("pool", ""), job.get("target", {}).get("serial", ""), job["state"])):
+            for col, val in enumerate((job["id"][:12], job.get("pool", ""), job.get("target", {}).get("serial", ""), state_label(job["state"]))):
                 item = QTableWidgetItem(val)
+                item.setToolTip(job['state'] if col == 3 else val)
                 if col == 3:
-                    item.setForeground(color_for(val))
+                    item.setForeground(color_for(job['state']))
                 self.job_table.setItem(row, col, item)
+        self.job_table.blockSignals(False)
         if self.jobs:
             index = next((i for i, j in enumerate(self.jobs) if j['id'] == selected_id), -1 if selected_id else 0)
             self.job_table.setCurrentCell(index, 0)
             self.job_selected()
         else:
             self.job_detail.setHtml("<p>Nessun intervento sul nodo. I piani non ancora inviati sono indicati come PREVIEW.</p>")
+            self.job_progress.hide()
+            self.job_notice.title.setText('Nessun intervento')
+            self.job_notice.description.setText('Analizza il server e genera un piano dalla sezione Sostituzione o Avvio EFI.')
+            self.update_action_states()
         self.statusBar().showMessage("Interventi aggiornati")
 
     def job_selected(self):
         row = self.job_table.currentRow()
         if row < 0 or row >= len(self.jobs):
+            self.job_detail.clear()
+            self.job_progress.hide()
+            self.job_notice.title.setText('Seleziona un intervento')
+            self.job_notice.description.setText('La selezione precedente non è disponibile. Seleziona una riga per leggere lo stato aggiornato.')
+            self.update_action_states()
             return
         job = self.jobs[row]
-        percent = job.get("scan_percent")
+        percent = job.get("system_observation", {}).get('scan_percent', job.get("scan_percent"))
         self.job_progress.setVisible(percent is not None or job["state"] == "COMPLETED")
         self.job_progress.setValue(100 if job["state"] == "COMPLETED" else min(100, max(0, int(percent or 0))))
-        e = html.escape
-        body = f"<h2>{e(job.get('pool', 'Intervento'))} · {e(job['state'])}</h2><p>ID {e(job['id'])}</p>"
-        if job.get("error"):
-            body += "<p style='color:#f18c99'>" + e(job["error"]) + "</p>"
-        if job.get('verification_error'):
-            body += "<p style='color:#f4bf65'>" + e(job['verification_error']) + "</p>"
-        if job.get("result_message"):
-            body += "<p><b>" + e(job["result_message"]) + "</b></p>"
-        if job.get("zfs_state"):
-            body += "<p>ZFS: " + e(job["zfs_state"]) + " · resilver: " + e(job.get("resilver_state", "DA_VERIFICARE")) + "</p>"
-        if job.get('registry_cleanup', {}).get('state') == 'REQUIRED':
-            body += '<p><b>Pulizia UUID EFI separata richiesta:</b> ' + e(', '.join(job['registry_cleanup']['missing_uuids'])) + '. Usare Avvio EFI → Piano pulizia UUID assenti, poi aggiornare questo intervento.</p>'
-        for disk in job.get("boot_validation", {}).get("disks", []):
-            body += "<h4>EFI " + e(disk["serial"] or "membro assente") + "</h4><ul>"
-            body += "".join("<li>" + e(name + ": " + c["state"] + " · " + c["detail"]) + "</li>" for name, c in disk["checks"].items()) + "</ul>"
-        if job.get("scan"):
-            body += "<p>" + e(job["scan"]).replace("\n", "<br>") + "</p>"
-            body += '<p>Velocità: ' + e(job.get('scan_rate', 'Non disponibile')) + ' · ETA ZFS: ' + e(job.get('scan_eta', 'Non disponibile')) + '</p>'
-        for event in job.get("events", []):
-            body += f"<h4>{e(event['state'])}</h4><pre>{e(event['command'])}</pre><pre>{e(event.get('out',''))}</pre><pre>{e(event.get('err',''))}</pre>"
-        if job.get("boot_test"):
-            body += "<p><b>Test avvio:</b> " + e(job["boot_test"]) + "</p>"
+        self.job_notice.title.setText(state_label(job['state']))
+        observation = job.get('system_observation') or {}
+        message = next_step(job)
+        if observation:
+            message = 'Stato attuale ZFS: ' + observation['state'] + '. ' + observation['detail'] + '\n' + message
+        self.job_notice.description.setText(message)
+        self.update_action_states()
+        body = job_html(job)
         self.job_detail.setHtml(body)
 
     def record_boot_result(self):
@@ -1101,7 +1133,7 @@ class Window(QMainWindow):
     def _poll(self):
         if self.busy or not self.backend:
             return
-        if any(j.get("state") in {"QUEUED", "RUNNING", "MONITORING", "WAITING_RESILVER"} for j in self.jobs):
+        if any(j.get("state") in ACTIVE_STATES or j.get('system_observation', {}).get('state') == 'RESILVERING' for j in self.jobs):
             self.refresh_jobs()
         elif self.live_refresh.isChecked():
             self.scan()

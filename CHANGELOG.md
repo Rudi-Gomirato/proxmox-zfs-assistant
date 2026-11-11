@@ -1,5 +1,14 @@
 # Modifiche
 
+## 0.4.1 — 11 novembre 2026
+
+- Risolto il falso blocco della nuova ESP: `DEVNAME` nell'export di `blkid` è metadato ammesso solo se coincide con la partizione richiesta. Firme, output ambigui e dati non nulli continuano a bloccare la formattazione.
+- Conservati risultati degli strumenti, stato della scansione e byte effettivamente letti anche in caso di errore, senza mostrare una verifica di zero byte se la lettura non è partita.
+- Centralizzati confronto WWN e identità composta; WWN condivisi richiedono anche seriale univoco e alias indipendente verificato sul dispositivo al momento dell'esecuzione.
+- Affiancato agli interventi `replace` FAILED/UNKNOWN lo stato ZFS corrente, senza riscrivere l'esito, ripetere il comando o usare il solo ONLINE come prova di provenienza per la formattazione.
+- Separati presentazione HTML, tema, widget e vocabolario degli stati dalla finestra principale. Navigazione laterale, prossimo passo e log espandibili; conferme e comandi del piano sempre consultabili.
+- Aggiunte regressioni per parser, identità, letture incomplete, riconciliazione in sola lettura e navigazione GUI. Nessuna nuova API distruttiva.
+
 ## 0.4.0 — 9 novembre 2026
 
 - Separati ripristino FAT32 esistente e inizializzazione della nuova ESP dopo sostituzione. Nessun format nel ripristino e nessuna ripresa EFI automatica dopo il resilver.

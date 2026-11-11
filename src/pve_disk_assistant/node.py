@@ -22,7 +22,9 @@ from pathlib import Path
 
 from . import __version__
 from .boot import boot_report, collect_boot, inspect_esp_namespace
-from .esp import blank_esp
+from .esp import blank_esp, EspCheckError
+from .identity import normalize_wwn, same_disk_identity, serial_alias
+from .workflow import REVIEW_STATES, observe_replacement
 from .core import (SafetyError, classify, data_groups, digest, disk_for, leaves,
                    merge_guids, parse_status, plan_replacement, safety_fingerprint, topology_fingerprint, ESP, disk_for_member)
 
@@ -278,7 +280,7 @@ def initialization_evidence(snapshot, request):
             if (old.get("action") == "replace" and old.get("host_id") == snapshot.get("host_id")
                     and old.get("pool_guid") == plan["pool_guid"]
                     and old.get("role") in {"BOOT", "MISTO"}
-                    and all(target.get(k) and old.get("target", {}).get(k) == target[k] for k in ("by_id", "serial", "wwn"))
+                    and same_disk_identity(target, old.get("target", {}))
                     and esp.get("partuuid") and old.get("expected_esp", {}).get("partuuid", "").lower() == esp["partuuid"].lower()
                     and any(e.get("phase") == "replace" and e.get("state") == "OK" and e.get("code") == 0 for e in old.get("events", []))):
                 matches.append(old)
@@ -289,7 +291,7 @@ def initialization_evidence(snapshot, request):
             raise SafetyError("Sostituzione ancora attiva o con esito ignoto: verificare l'intervento prima della ESP.")
         evidence["replacement_id"] = old["id"]
         evidence["identity"] = {"by_id": target["by_id"], "serial": target["serial"],
-                                "wwn": target["wwn"], "partuuid": esp["partuuid"]}
+                                "wwn": normalize_wwn(target["wwn"]), "partuuid": esp["partuuid"]}
         boot_resume_checks(plan, snapshot)
         pool = next(p for p in snapshot["pools"] if p["guid"] == plan["pool_guid"])
         old_pool = next((p for p in old.get("before", {}).get("pools", []) if p["guid"] == plan["pool_guid"]), {})
@@ -301,6 +303,8 @@ def initialization_evidence(snapshot, request):
         evidence["blank"] = blank_esp(plan["expected_esp"]["path"], esp.get("size", 0), run)
     except (SafetyError, OSError, ValueError) as exc:
         evidence["error"] = str(exc)
+        evidence["blank"] = (exc.evidence if isinstance(exc, EspCheckError) else
+                             {"state": "NOT_STARTED", "all_zero": False, "bytes_read": 0})
     return evidence
 
 
@@ -393,12 +397,15 @@ def verify_target(plan):
     target = plan["target"]
     if os.path.realpath(target["by_id"]) != target["path"]:
         raise SafetyError("La destinazione persistente ha cambiato dispositivo: piano interrotto.")
+    independent_alias = serial_alias(target)
+    if independent_alias and os.path.realpath(independent_alias) != target["path"]:
+        raise SafetyError("Alias del seriale e WWN non puntano allo stesso dispositivo fisico.")
     result = run(["lsblk", "--json", "--bytes", "--nodeps", "--output", "NAME,SERIAL,WWN,SIZE,RO", target["by_id"]])
     rows = json_output(result).get("blockdevices", [])
     if (result["code"] or len(rows) != 1 or str(rows[0].get("serial") or "").strip() != target["serial"]
             or int(rows[0].get("size") or 0) != target["size"] or rows[0].get("ro")
-            or (target.get("wwn") and rows[0].get("wwn") != target["wwn"])):
-        raise SafetyError("Seriale, capacità o accessibilità del nuovo disco cambiati.")
+            or (target.get("wwn") and normalize_wwn(rows[0].get("wwn")) != normalize_wwn(target["wwn"]))):
+        raise SafetyError("Seriale, WWN, capacità o accessibilità del nuovo disco cambiati.")
 
 
 def verify_partition(plan, path):
@@ -492,7 +499,7 @@ def zfs_ready(plan, snapshot, pool):
                    and d.get("serial") == plan["target"]["serial"]), None)
     members = leaves(pool)
     return (snapshot["complete"] and not snapshot.get("issues") and not pool.get("warnings") and target is not None
-            and (not plan["target"].get("wwn") or target.get("wwn") == plan["target"]["wwn"])
+            and (not plan["target"].get("wwn") or normalize_wwn(target.get("wwn")) == normalize_wwn(plan["target"]["wwn"]))
             and any(disk_for_member(snapshot, m) == target for m in members)
             and pool["state"] == "ONLINE" and pool["errors"] == "No known data errors"
             and all(m["state"] in {"ONLINE", "HEALTHY"} and len(m["errors"]) == 3 and not any(m["errors"]) for m in members)
@@ -602,8 +609,12 @@ def get_status(identifier):
 def _get_status(identifier):
     plan = load_record(identifier)
     is_boot = plan.get("role") in {"BOOT", "MISTO"} and plan.get("action") != "offline"
-    review_states = {"MONITORING", "WAITING_RESILVER", "BOOT_REVIEW_REQUIRED", "BOOT_TEST_REQUIRED", "BOOT_TEST_PENDING", "ESP_INITIALIZATION_REQUIRED", "ZFS_REVIEW_REQUIRED"}
-    if plan["state"] in review_states or (is_boot and plan["state"] == "COMPLETED"):
+    if plan.get("action") == "replace" and plan["state"] in {"FAILED", "UNKNOWN"}:
+        # Read-only reconciliation: no command replay and no new write approval.
+        plan["system_observation"] = observe_replacement(plan, collect())
+        save_record(plan)
+        return plan
+    if plan["state"] in REVIEW_STATES or (is_boot and plan["state"] == "COMPLETED"):
         snapshot = collect()
         pool = next((p for p in snapshot["pools"] if p["guid"] == plan["pool_guid"]), None)
         plan["scan"] = pool.get("scan", "") if pool else "Pool non rilevato"

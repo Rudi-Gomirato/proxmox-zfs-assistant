@@ -10,6 +10,7 @@ import json
 import re
 import shlex
 from copy import deepcopy
+from .identity import composite_identity_verified, wwn_peers
 
 GOOD = {"ONLINE", "HEALTHY"}
 BAD = {"FAULTED", "UNAVAIL", "OFFLINE", "REMOVED", "DEGRADED"}
@@ -512,8 +513,8 @@ def plan_boot_repair(snapshot, request, initialize=False):
             blocks.append("Sostituzione precedente e PARTUUID non verificati nel registro del nodo.")
         if evidence.get("error") or not evidence.get("blank", {}).get("all_zero"):
             blocks.append(evidence.get("error") or "Assenza di dati non dimostrata: occorrono verifica delle firme e lettura integrale della ESP.")
-        if not target.get("wwn") or sum(d.get("wwn") == target.get("wwn") for d in snapshot["disks"]) != 1:
-            blocks.append("WWN del nuovo disco assente o non univoco: identità incompleta.")
+        if not composite_identity_verified(snapshot["disks"], target):
+            blocks.append("Identità fisica non univoca: verificare WWN, seriale e alias persistente del disco; nessuna formattazione.")
         zfs_parts = [p for p in target.get("partitions", []) if p.get("parttype", "").lower() == ZFS
                      and member["name"] in [p["path"], *p.get("aliases", [])]]
         if (not esp or esp.get("parttype", "").lower() != ESP or len(zfs_parts) != 1
@@ -542,6 +543,8 @@ def plan_boot_repair(snapshot, request, initialize=False):
         "boot_id_before": snapshot.get("boot_id", ""), "fingerprint": safety_fingerprint(snapshot),
         "topology_fingerprint": topology_fingerprint(pool), "steps": steps, "blocks": blocks,
         "warnings": ["Ripristino della sola ESP: nessun sgdisk, zpool replace o grub-install generico.",
+                     *(["WWN condiviso da più dischi: identità vincolata anche al seriale univoco e al suo alias by-id, ricontrollati sul nodo."]
+                       if initialize and len(wwn_peers(snapshot["disks"], target)) > 1 else []),
                      "Gli UUID EFI assenti richiedono un piano separato di pulizia, dopo la verifica di entrambe le ESP.",
                      "La prova di avvio autonomo richiede una manutenzione e non è dedotta dai file EFI."],
         "guests": pool.get("guests", [])}

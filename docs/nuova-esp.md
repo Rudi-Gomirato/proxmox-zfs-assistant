@@ -1,4 +1,4 @@
-# Inizializza nuova ESP dopo sostituzione disco — 0.4.0
+# Inizializza nuova ESP dopo sostituzione disco — aggiornato a 0.4.1
 
 Questa procedura completa dall'app la fase EFI di una sostituzione del mirror root ZFS. È distinta dal **Piano ripristino della sola ESP selezionata**, che richiede una FAT32 già coerente e non propone mai una formattazione.
 
@@ -15,7 +15,7 @@ Aggiornare il client Windows e, dalla scheda **Connessione**, usare **Installa /
 ## Verifiche prima della formattazione
 
 - Root ZFS, Proxmox 8/9, UEFI x86_64, mirror di due membri ONLINE, contatori senza errori e nessun resilver attivo. Deve risultare un resilver concluso senza errori (o uno scrub successivo concluso), diverso dal risultato precedente alla sostituzione.
-- Identità del ricambio per by-id, seriale e WWN univoci; PARTUUID dell'ESP corrispondente a quello registrato **prima** del comando di sostituzione. Nel registro del nodo deve esserci un `replace` terminato con successo sullo stesso host e pool.
+- Identità del ricambio per by-id, seriale univoco e WWN normalizzato; un WWN condiviso richiede anche un alias by-id indipendente contenente il seriale, univoco nell'inventario e verificato sullo stesso dispositivo in esecuzione. WWN assente o identità ambigua restano bloccanti. PARTUUID dell'ESP corrispondente a quello registrato **prima** del comando di sostituzione. Nel registro del nodo deve esserci un `replace` terminato con successo sullo stesso host e pool.
 - ESP GPT unica, non montata, sul nuovo disco, distinta dalla partizione ZFS e senza dispositivi dipendenti. Il membro di riferimento deve avere una configurazione di avvio verificata.
 - `blkid -p` e `wipefs --json` devono escludere firme. Un risultato `blkid` contenente solo metadati GPT `PART_ENTRY_*` è distinto da un filesystem: il solo codice di uscita non basta.
 - Lettura in sola lettura di **tutti i byte dell'ESP**: devono essere nulli. Non si usano campionamenti. Dimensione verificata sul dispositivo a blocchi, massimo 4 GiB, scadenza della lettura 60 secondi. Errori, letture incomplete, firme sconosciute o anche un solo byte non nullo bloccano il piano.
