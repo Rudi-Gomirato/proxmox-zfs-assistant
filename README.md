@@ -2,7 +2,7 @@
 
 App desktop Windows in Python per diagnosticare dischi e pool ZFS di Proxmox VE 8 e 9 e guidare la sostituzione dei membri guasti. Interfaccia in italiano, collegamento SSH e comandi spiegati prima dell'approvazione. Codice originale con [licenza MIT](LICENSE).
 
-**Versione 0.4.1 da collaudare in laboratorio.** GUI, motore e helper sono implementati e verificati con test automatici e dati sintetici. Non è ancora certificata la compatibilità con server, bootloader o LED reali. Leggi la [matrice di compatibilità](docs/compatibilita.md) prima di usare operazioni modificative.
+**Versione 0.5.0 da collaudare in laboratorio.** GUI, motore e helper sono implementati e verificati con test automatici e dati sintetici. Non è ancora certificata la compatibilità con server, bootloader o LED reali. Leggi la [matrice di compatibilità](docs/compatibilita.md) prima di usare operazioni modificative.
 
 **Aggiornamento da versioni precedenti:** senza comandi attivi, usa **Installa / aggiorna helper sul nodo** dalla scheda Connessione e ripeti l'analisi. I piani richiedono app e helper della stessa versione. Le correzioni sono elencate nel [changelog](CHANGELOG.md).
 
@@ -13,6 +13,16 @@ App desktop Windows in Python per diagnosticare dischi e pool ZFS di Proxmox VE 
 In questa cartella esegui `avvia.cmd`. Se parti da un clone nuovo, installa Python 3.10 o successivo ed esegui prima `installa.cmd`. L'app si apre in modalità demo: scegli VM mirror, VM RAIDZ1 oppure EFI non valida dalla Panoramica. In caso di errore di avvio, trovi i dettagli in `%LOCALAPPDATA%\ProxmoxZfsAssistant\startup-error.log`.
 
 Per il pacchetto compilato, estrai l'intero ZIP e avvia `ProxmoxZfsAssistant.exe`. Conserva tutte le librerie e le licenze della distribuzione.
+
+## Novità 0.5.0
+
+- Disk by ID verificato in primo piano, copia del percorso e correlazione con seriale, WWN, GUID ZFS, dispositivo Linux e PARTUUID. Alias basati sul seriale preferiti; WWN duplicati segnalati senza impedire la diagnosi.
+- **Avvio EFI → Prova avvio da questo disco**: diagnostica, selezione della voce esistente e quattro conferme prima di impostare BootNext.
+- **Riavvio con seconda approvazione**, senza modificare BootOrder. Non viene creato alcun bootloader o percorso UEFI durante il test.
+- Riconnessione SSH e verifica di nuovo boot, BootCurrent, identità/ESP, kernel e mirror. Un BootOrder cambiato dal firmware viene registrato; SSH assente significa esito non determinato.
+- Storico persistente sul nodo e in SQLite, recupero dopo la chiusura dell'app e report JSON/HTML/PDF anonimizzati. Il test UEFI resta distinto dalla prova fisica di autonomia.
+
+[Procedura completa, stati e collaudo 0.5.0](docs/test-uefi-0.5.md). Aggiornare anche l'helper: GUI e helper devono avere la stessa versione.
 
 ## Correzioni e refactoring 0.4.1
 

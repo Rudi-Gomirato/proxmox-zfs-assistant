@@ -219,6 +219,9 @@ def test_anonymous_report_formats(app, tmp_path, monkeypatch, extension):
     window.backend = DemoBackend()
     window.render_snapshot(snapshot())
     path = tmp_path / ('report.' + extension)
+    window.store.save_uefi_test({'id': 'export-test', 'action': 'uefi_test', 'host_id': window.snapshot['host_id'],
+                                'created_at': 1, 'state': 'UEFI_PASSED', 'target': window.snapshot['disks'][0],
+                                'observation': {'current': '0001', 'boot_order_changed': True}})
     monkeypatch.setattr(gui.QFileDialog, 'getSaveFileName', lambda *a: (str(path), ''))
     monkeypatch.setattr(gui.QMessageBox, 'information', lambda *a: None)
     window.export_report()
@@ -227,6 +230,8 @@ def test_anonymous_report_formats(app, tmp_path, monkeypatch, extension):
         assert path.read_bytes().startswith(b'%PDF')
     else:
         assert 'DEMO_BOOT_A' not in path.read_text(encoding='utf-8')
+        assert 'uefi_tests' in path.read_text(encoding='utf-8')
+        assert 'UEFI_PASSED' in path.read_text(encoding='utf-8')
     window.close()
 
 
@@ -241,4 +246,128 @@ def test_saved_profiles_exclude_password(app, tmp_path, monkeypatch):
     window.load_profile()
     assert window.password.text() == ''
     assert window.backend is None
+    window.close()
+
+
+def test_uefi_ssh_unavailable_keeps_indeterminate_and_recovers_after_app_close(app, tmp_path, monkeypatch):
+    from test_uefi import inventory, request
+    from pve_disk_assistant.uefi import preflight
+    snap = inventory()
+    record = preflight(snap, request(snap))
+    record.update(id='a'*32, state='UEFI_REBOOT_REQUESTED', created_at=1, events=[])
+    window = Window(tmp_path, demo=False)
+    window.render_snapshot(snap)
+    window.store.save_uefi_test(record)
+    calls = []
+    class Offline:
+        def rpc(self, payload):
+            calls.append(payload['op'])
+            raise RuntimeError('SSH timeout simulated')
+    window.backend = Offline()
+    monkeypatch.setattr(window, 'asynchronous', lambda fn, callback, *a, **k: callback(fn()))
+    window.refresh_uefi(True)
+    result = window.store.uefi_tests(snap['host_id'])[0]
+    assert result['state'] == 'UEFI_UNDETERMINED'
+    assert calls == ['collect']
+    window.close()
+    reopened = Window(tmp_path, demo=False)
+    reopened.render_snapshot(snap)
+    assert reopened.uefi_records[0]['id'] == record['id']
+    assert not reopened.uefi_reboot_button.isEnabled()
+    reopened.close()
+
+
+def test_uefi_reboot_requires_second_dialog_and_keeps_physical_test_separate(app, tmp_path, monkeypatch):
+    from test_uefi import inventory, request
+    from pve_disk_assistant.uefi import preflight
+    snap = inventory()
+    record = preflight(snap, request(snap))
+    record.update(id='a'*32, state='UEFI_READY_REBOOT', created_at=1, events=[])
+    window = Window(tmp_path, demo=False)
+    window.backend = object()
+    window.render_snapshot(snap)
+    window.save_uefi(record)
+    queued = []
+    monkeypatch.setattr(window, 'queue_uefi_write', lambda *a: queued.append(a))
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a: QMessageBox.StandardButton.No)
+    window.reboot_uefi()
+    assert not queued
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a: QMessageBox.StandardButton.Yes)
+    window.reboot_uefi()
+    assert queued[0][0]['op'] == 'uefi_reboot'
+    assert queued[0][0]['confirmed'] is True
+    window.close()
+
+
+def test_copy_identity_and_uefi_demo_are_readonly(app, tmp_path):
+    window = Window(tmp_path, demo=False)
+    window.backend = DemoBackend()
+    window.render_snapshot(window.backend.rpc({'op': 'collect'}))
+    window.copy_disk_id('efi')
+    assert app.clipboard().text() == window.snapshot['disks'][0]['by_id']
+    plan = window.backend.rpc({'op': 'uefi_preview', 'request': {'pool_guid': '1000', 'target': app.clipboard().text()}})
+    assert plan['read_only'] and plan['blocks']
+    assert not window.uefi_reboot_button.isEnabled()
+    assert 'Disk by ID' in window.disk_table.horizontalHeaderItem(0).text()
+    assert window.snapshot['disks'][0]['by_id'] in window.system_disks.toPlainText()
+    window.close()
+
+
+def test_uefi_intent_is_saved_locally_before_sending_once(app, tmp_path, monkeypatch):
+    from test_uefi import inventory, request
+    from pve_disk_assistant.uefi import preflight
+    snap = inventory()
+    record = preflight(snap, request(snap))
+    record.update(id='a'*32, state='UEFI_READY_REBOOT', created_at=1, events=[])
+    window = Window(tmp_path, demo=False)
+    window.render_snapshot(snap)
+    sent = []
+    class Backend:
+        def rpc(self, payload):
+            sent.append(payload)
+            saved = window.store.uefi_tests(snap['host_id'])[0]
+            assert saved['state'] == 'UEFI_REBOOT_REQUESTED'
+            raise RuntimeError('lost SSH after send')
+    window.backend = Backend()
+    monkeypatch.setattr(window, 'asynchronous', lambda fn, callback, *a, **k: callback(fn()))
+    window.queue_uefi_write({'op': 'uefi_reboot'}, record, 'UEFI_REBOOT_REQUESTED')
+    app.processEvents()
+    assert len(sent) == 1
+    saved = window.store.uefi_tests(snap['host_id'])[0]
+    assert saved['state'] == 'UEFI_UNDETERMINED'
+    assert len(saved['connection_events']) == 1
+    window.store.save_uefi_test({**record, 'state': 'UEFI_PASSED'})
+    assert window.store.uefi_tests(snap['host_id'])[0]['connection_events']
+    window.close()
+
+
+def test_bootnext_dialog_requires_four_checks_and_exact_serial(app, tmp_path, monkeypatch):
+    from test_uefi import inventory, request
+    from pve_disk_assistant.uefi import preflight
+    from PySide6.QtWidgets import QDialog, QCheckBox, QLineEdit
+    snap = inventory()
+    plan = preflight(snap, request(snap))
+    plan.update(id='b'*32, state='UEFI_PREVIEW', created_at=1, events=[], approval_digest='fixture')
+    window = Window(tmp_path, demo=False)
+    window.backend = object()
+    window.render_snapshot(snap)
+    queued = []
+    monkeypatch.setattr(window, 'queue_uefi_write', lambda *a: queued.append(a))
+    def dialog_exec(dialog):
+        confirm = next(b for b in dialog.findChildren(QPushButton) if b.text().startswith('Approva solo BootNext'))
+        checks = dialog.findChildren(QCheckBox)
+        serial = dialog.findChild(QLineEdit)
+        assert len(checks) == 4 and not confirm.isEnabled()
+        for check in checks:
+            check.setChecked(True)
+        serial.setText('WRONG')
+        assert not confirm.isEnabled()
+        serial.setText(plan['target']['serial'])
+        assert confirm.isEnabled()
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(QDialog, 'exec', dialog_exec)
+    window.uefi_plan_dialog(plan, True)
+    assert queued[0][0]['op'] == 'uefi_set_next'
+    assert all(queued[0][0]['confirmations'].values())
+    assert not any(q[0]['op'] == 'uefi_reboot' for q in queued)
     window.close()

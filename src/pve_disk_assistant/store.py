@@ -13,9 +13,28 @@ class Store:
         with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY, host TEXT, at TEXT, data TEXT)")
+            db.execute("CREATE TABLE IF NOT EXISTS uefi_tests (id TEXT PRIMARY KEY, host TEXT NOT NULL, at REAL NOT NULL, data TEXT NOT NULL)")
 
     def _connect(self):
         return sqlite3.connect(self.path)
+
+    def save_uefi_test(self, record):
+        # Records are node observations / approvals, never SSH configuration.
+        if record.get('action') != 'uefi_test':
+            raise ValueError('Not a UEFI test')
+        with self._connect() as db:
+            previous = db.execute('SELECT data FROM uefi_tests WHERE id=?', (record['id'],)).fetchone()
+            history = json.loads(previous[0]).get('connection_events', []) if previous else []
+            if record.get('connection_error') and (not history or history[-1]['error'] != record['connection_error']):
+                history.append({'at': datetime.now(timezone.utc).isoformat(), 'error': record['connection_error']})
+            record = {**record, 'connection_events': history}
+            db.execute('INSERT OR REPLACE INTO uefi_tests VALUES (?,?,?,?)',
+                       (record['id'], record['host_id'], record.get('created_at', 0), json.dumps(record, ensure_ascii=False)))
+
+    def uefi_tests(self, host_id):
+        with self._connect() as db:
+            rows = db.execute('SELECT data FROM uefi_tests WHERE host=? ORDER BY at', (host_id,)).fetchall()
+        return [json.loads(r[0]) for r in rows]
 
     def get(self, key, default=None):
         with self._connect() as db:

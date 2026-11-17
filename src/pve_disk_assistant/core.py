@@ -174,13 +174,13 @@ def storage_config(text):
 def disk_for(snapshot, path):
     if not path:
         return None
+    matches = []
     for disk in snapshot.get("disks", []):
         if path in [disk["path"], disk.get("by_id", ""), *disk.get("aliases", [])]:
-            return disk
-        for partition in disk.get("partitions", []):
-            if path in [partition["path"], *partition.get("aliases", [])]:
-                return disk
-    return None
+            matches.append(disk)
+        elif any(path in [p['path'], *p.get('aliases', [])] for p in disk.get('partitions', [])):
+            matches.append(disk)
+    return matches[0] if len(matches) == 1 else None
 
 
 def partition_for(disk, path):

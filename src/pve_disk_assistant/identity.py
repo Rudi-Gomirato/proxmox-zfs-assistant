@@ -11,7 +11,10 @@ def normalize_wwn(value):
 
 
 def same_disk_identity(left, right):
-    return (all(left.get(k) and left.get(k) == right.get(k) for k in ("by_id", "serial"))
+    same_alias = (left.get('by_id') and right.get('by_id') and
+                  (left['by_id'] in [right['by_id'], *right.get('aliases', [])] or
+                   right['by_id'] in [left['by_id'], *left.get('aliases', [])]))
+    return (same_alias and left.get('serial') and left['serial'] == right.get('serial')
             and bool(normalize_wwn(left.get("wwn")))
             and normalize_wwn(left.get("wwn")) == normalize_wwn(right.get("wwn")))
 
@@ -42,3 +45,36 @@ def composite_identity_verified(disks, target):
     alias = serial_alias(target)
     return bool(alias and len({d.get("path") for d in peers}) == len(peers)
                 and sum(alias in d.get("aliases", []) for d in disks) == 1)
+
+
+def physical_identity_verified(disks, target):
+    """WWN is optional, but neither a duplicate WWN nor /dev/sdX proves identity."""
+    if not target or not target.get('identity_verified') or not target.get('by_id') or not target.get('serial'):
+        return False
+    if sum(d.get('serial') == target['serial'] for d in disks) != 1:
+        return False
+    if sum(target['by_id'] in [d.get('by_id'), *d.get('aliases', [])] for d in disks) != 1:
+        return False
+    peers = wwn_peers(disks, target)
+    if len(peers) == 1:
+        return True
+    alias = serial_alias(target)
+    return bool(alias and sum(alias in d.get('aliases', []) for d in disks) == 1)
+
+
+def annotate_identities(disks):
+    """Annotate freshly resolved inventory; never synthesize an alias."""
+    for disk in disks:
+        warnings = []
+        if len(wwn_peers(disks, disk)) > 1:
+            warnings.append('WWN duplicato rilevato. L’identificazione tramite WWN non è affidabile per questi dispositivi.')
+        if not physical_identity_verified(disks, disk):
+            warnings.append('Identità fisica assente o ambigua: modifiche bloccate, diagnostica disponibile.')
+            disk['identity_verified'] = False
+        for part in disk.get('partitions', []):
+            partuuid = part.get('partuuid', '').lower()
+            if partuuid and sum(p.get('partuuid', '').lower() == partuuid for d in disks for p in d.get('partitions', [])) != 1:
+                warnings.append('PARTUUID duplicato: associazione della partizione ambigua.')
+                disk['identity_verified'] = False
+        disk['identity_warnings'] = warnings
+    return disks

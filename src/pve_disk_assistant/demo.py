@@ -121,7 +121,15 @@ class DemoBackend:
     def rpc(self, request):
         from .core import plan_replacement
         if request["op"] == "collect":
-            return snapshot(self.raidz, self.boot_fault)
+            result = snapshot(self.raidz, self.boot_fault)
+            add_uefi_demo(result)
+            return result
+        if request['op'] in {'uefi_preview', 'uefi_plan'}:
+            from .uefi import preflight
+            result = preflight(self.rpc({'op': 'collect'}), request['request'])
+            result.update(id='demo-uefi', state='UEFI_PREVIEW', events=[], read_only=True)
+            result['blocks'].append('Demo: nessuna impostazione BootNext e nessun riavvio reale.')
+            return result
         if request["op"] == "plan":
             result = plan_replacement(snapshot(self.raidz, self.boot_fault), request["request"])
             result.update({"id": "demo", "state": "PREVIEW", "events": []})
@@ -129,3 +137,18 @@ class DemoBackend:
         if request["op"] == "list_jobs":
             return []
         raise RuntimeError("Modalità dimostrativa: nessuna modifica o identificazione hardware reale.")
+
+
+def add_uefi_demo(snapshot):
+    snapshot['kernel'] = 'demo-pve'
+    snapshot['tools'].append('efibootmgr')
+    entries = []
+    for disk in snapshot['disks']:
+        for part in disk.get('partitions', []):
+            if part.get('parttype') == ESP:
+                files = snapshot['boot']['esps'].get(part['path'], {}).get('files', [])
+                loader = next((f for f in files if f.get('efi_valid') and 'BOOTX64' not in f['path']), None)
+                if loader:
+                    entries.append({'id': f'{len(entries)+1:04X}', 'partuuid': part['partuuid'].lower(),
+                                    'file': loader['path'].lower(), 'active': True})
+    snapshot['boot']['nvram'] = {'code': 0, 'current': '0001', 'next': '', 'order': [e['id'] for e in entries], 'entries': entries}

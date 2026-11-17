@@ -1,5 +1,7 @@
 # Compatibilità e stato del collaudo
 
+> **0.5.0, 17 novembre 2026:** test BootNext implementato per Proxmox 8/9, UEFI x86_64, root ZFS su mirror di due membri ONLINE e configurazione EFI verificata su entrambi. Richiede una voce UEFI già esistente, attiva e associata al PARTUUID e a un file riconosciuto. GRUB, shim con configurazione GRUB e systemd-boot sono rilevati dai dati; non viene presunto un nome file unico. Systemd-boot con Secure Boot, BIOS Legacy e layout non verificabili restano bloccati. Cluster/HA e VM/CT ancora accesi bloccano il riavvio dall'app. Nessun server reale è stato riavviato durante lo sviluppo. [Procedura e matrice di collaudo](test-uefi-0.5.md).
+
 > Aggiornamento 0.4.0: la nuova ESP richiede un piano distinto con conferma di formattazione; non riprende automaticamente dopo il resilver. Il ripristino delle ESP esistenti non formatta. Vedi la [procedura corrente](nuova-esp.md).
 
 Aggiornamento 0.3.0: [comportamento attuale, estensioni e collaudo](collaudo-0.3.md). Le limitazioni precedenti descritte sotto sono aggiornate da questa nota.

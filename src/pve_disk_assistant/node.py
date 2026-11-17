@@ -23,7 +23,7 @@ from pathlib import Path
 from . import __version__
 from .boot import boot_report, collect_boot, inspect_esp_namespace
 from .esp import blank_esp, EspCheckError
-from .identity import normalize_wwn, same_disk_identity, serial_alias
+from .identity import normalize_wwn, same_disk_identity, serial_alias, annotate_identities
 from .workflow import REVIEW_STATES, observe_replacement
 from .core import (SafetyError, classify, data_groups, digest, disk_for, leaves,
                    merge_guids, parse_status, plan_replacement, safety_fingerprint, topology_fingerprint, ESP, disk_for_member)
@@ -80,16 +80,17 @@ def aliases():
     mapping = {}
     for base in ("/dev/disk/by-id", "/dev/disk/by-partuuid", "/dev/disk/by-uuid"):
         for path in glob.glob(base + "/*"):
-            if os.path.exists(path):
+            if os.path.islink(path) and os.path.exists(path):
                 mapping.setdefault(os.path.realpath(path), []).append(path)
     return mapping
 
 
-def stable_id(paths):
+def stable_id(paths, serial=""):
     paths = [p for p in paths if p.startswith("/dev/disk/by-id/")
              and re.match(r"(?:ata-|wwn-|scsi-|nvme-)", os.path.basename(p))
              and not re.search(r"-part\d+$", p)]
-    return sorted(paths, key=lambda p: (not os.path.basename(p).startswith("wwn-"), p))[0] if paths else ""
+    independent = serial_alias({'serial': serial, 'aliases': sorted(paths)})
+    return independent or (sorted(paths, key=lambda p: (not os.path.basename(p).startswith("wwn-"), p))[0] if paths else "")
 
 
 def discover_disks(blocks):
@@ -113,7 +114,7 @@ def discover_disks(blocks):
                 "ro": bool(item.get("ro")), "aliases": mapping.get(path, []),
                 "mounts": [m for m in item.get("mountpoints", []) or [] if m],
                 "partitions": [], "holders": [], "signatures": [], "smart": {}}
-        disk["by_id"] = stable_id(disk["aliases"])
+        disk["by_id"] = stable_id(disk["aliases"], serial)
         disk["identity_verified"] = bool(disk["by_id"] and os.path.realpath(disk["by_id"]) == path and serial)
         children = list(descend(item.get("children", [])))
         for child in children:
@@ -143,7 +144,7 @@ def discover_disks(blocks):
         disk["locate_paths"] = [p for p in glob.glob("/sys/class/enclosure/*/*/locate")
                                 if os.path.exists(str(Path(p).parent / "device" / "block" / os.path.basename(path)))]
         disks.append(disk)
-    return disks
+    return annotate_identities(disks)
 
 
 def collect():
@@ -197,7 +198,7 @@ def collect():
     snapshot = {"schema": 2, "helper_version": __version__, "collected_at": utcnow(),
         "boot_id": read_text("/proc/sys/kernel/random/boot_id"), "boot_started_at": int(boot_started[1]) if boot_started else 0,
         "host_id": read_text("/etc/machine-id"), "hostname": os.uname().nodename.split(".")[0],
-        "pve_version": version["out"].splitlines()[0] if version["out"] else "",
+        "pve_version": version["out"].splitlines()[0] if version["out"] else "", "kernel": os.uname().release,
         "root": root, "mounts": mounts, "pools": pools, "disks": discover_disks(lb.get("blockdevices", [])),
         "storages": stores, "guests": guests, "boot": {"status": boot["out"] + boot["err"], "code": boot["code"]},
         "tools": [t for t in TOOLS if shutil.which(t, path=PATH)], "issues": issues,
@@ -348,6 +349,7 @@ def spawn_worker(identifier, mode="--run"):
 
 def submit(request):
     with locked():
+        from .uefi import PENDING
         plan = load_record(request.get("id"))
         if plan["state"] != "PREVIEW":
             raise SafetyError("Piano già inviato: consultare l'esito, non inviarlo di nuovo.")
@@ -370,7 +372,7 @@ def submit(request):
             entry = json.loads(path.read_text())
             if entry["id"] == plan.get("replacement_id") and entry.get("state") == "WAITING_RESILVER":
                 continue  # Fresh ONLINE/source/identity checks below remain mandatory.
-            if entry["id"] != plan["id"] and entry.get("state") in {"QUEUED", "RUNNING", "WAITING_RESILVER", "MONITORING", "UNKNOWN"}:
+            if entry["id"] != plan["id"] and entry.get("state") in PENDING | {"QUEUED", "RUNNING", "WAITING_RESILVER", "MONITORING", "UNKNOWN"}:
                 raise SafetyError("Un intervento è già in coda, attivo o con esito ignoto.")
         fresh = collect()
         refreshed = build_plan(fresh, plan["request"])
@@ -495,7 +497,7 @@ def boot_resume_checks(plan, snapshot):
 
 
 def zfs_ready(plan, snapshot, pool):
-    target = next((d for d in snapshot["disks"] if d.get("by_id") == plan["target"]["by_id"]
+    target = next((d for d in snapshot["disks"] if plan["target"]["by_id"] in [d.get("by_id"), *d.get('aliases', [])]
                    and d.get("serial") == plan["target"]["serial"]), None)
     members = leaves(pool)
     return (snapshot["complete"] and not snapshot.get("issues") and not pool.get("warnings") and target is not None
@@ -602,6 +604,9 @@ def perform_job(identifier):
 
 def get_status(identifier):
     record_path(identifier)
+    if load_record(identifier).get('action') == 'uefi_test':
+        from .uefi_service import status
+        return status(identifier)
     with locked("status-" + identifier):
         return _get_status(identifier)
 
@@ -701,7 +706,7 @@ def record_boot_test(request):
 def _record_boot_test(request):
     with locked():
         plan = load_record(request.get("id"))
-        if plan.get("role") not in {"BOOT", "MISTO"} or plan.get("action") == "offline" or plan["state"] in {"QUEUED", "RUNNING", "WAITING_RESILVER", "UNKNOWN", "FAILED"}:
+        if plan.get("role") not in {"BOOT", "MISTO"} or plan.get("action") in {"offline", "uefi_test"} or plan["state"] in {"QUEUED", "RUNNING", "WAITING_RESILVER", "UNKNOWN", "FAILED"}:
             raise SafetyError("Non è possibile registrare una prova in questa fase.")
         if request.get("confirmed") is not True:
             raise SafetyError("Conferma della prova fisica di avvio mancante.")
@@ -784,6 +789,17 @@ def shutdown(request):
     snapshot = collect()
     if request.get("host_id") != snapshot["host_id"]:
         raise SafetyError("Identità host diversa dall'approvazione.")
+    power_preflight(snapshot)
+    with locked():
+        from .uefi_service import no_active_operation
+        no_active_operation()
+        result = run(["shutdown", "-h", "+1"])
+        if result["code"]:
+            raise SafetyError(result["err"])
+    return {"message": "Spegnimento richiesto fra un minuto. Verificare fisicamente il PC spento prima di scollegare cavi."}
+
+
+def power_preflight(snapshot):
     if glob.glob("/etc/pve/ha/resources.cfg") and read_text("/etc/pve/ha/resources.cfg"):
         raise SafetyError("Risorse HA configurate: usare il piano di manutenzione del cluster.")
     if (Path("/etc/pve/corosync.conf").exists() or Path("/etc/corosync/corosync.conf").exists()
@@ -795,20 +811,18 @@ def shutdown(request):
         raise SafetyError("Stato VM/CT non verificabile: arrestare i carichi e usare la GUI Proxmox.")
     if any(g.get("node") == snapshot["hostname"] and g.get("status") == "running" for g in rows):
         raise SafetyError("VM o container ancora accesi: arrestarli da Proxmox prima di spegnere il nodo.")
-    with locked():
-        if any(json.loads(p.read_text()).get("state") in {"QUEUED", "RUNNING", "WAITING_RESILVER", "MONITORING", "UNKNOWN"} for p in state_dir().glob("*.json")):
-            raise SafetyError("Intervento in coda, attivo o con esito ignoto: spegnimento non consentito dall'app.")
-        result = run(["shutdown", "-h", "+1"])
-        if result["code"]:
-            raise SafetyError(result["err"])
-    return {"message": "Spegnimento richiesto fra un minuto. Verificare fisicamente il PC spento prima di scollegare cavi."}
 
 
 def dispatch(request):
-    if '--read-only' in sys.argv and request.get('op') not in {'collect', 'version', 'preview', 'list_jobs'}:
+    if '--read-only' in sys.argv and request.get('op') not in {'collect', 'version', 'preview', 'list_jobs', 'uefi_preview'}:
         raise SafetyError('Helper in sola lettura: operazione non consentita.')
     state_dir()
     operation = request.get("op")
+    if operation in {'uefi_plan', 'uefi_preview', 'uefi_set_next', 'uefi_reboot'}:
+        from . import uefi_service
+        if operation in {'uefi_plan', 'uefi_preview'}:
+            return uefi_service.prepare(request['request'], read_only=operation == 'uefi_preview')
+        return (uefi_service.set_next if operation == 'uefi_set_next' else uefi_service.reboot)(request)
     if operation == "collect":
         return collect()
     if operation == "version":

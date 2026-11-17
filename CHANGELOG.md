@@ -1,5 +1,15 @@
 # Modifiche
 
+## 0.5.0 — 17 novembre 2026
+
+- Inventario: preferenza per alias by-id contenenti il seriale, risoluzione dei symlink esistenti, avvisi WWN duplicati, blocchi su seriali/alias/PARTUUID ambigui. La risoluzione non sceglie più il primo disco in caso di alias condiviso.
+- Identificativi persistenti e pulsanti copia in Panoramica, Diagnosi, Sostituzione, Interventi e Avvio EFI; correlazione con modello, seriale, WWN, GUID ZFS e partizioni. Nessun export/import del pool per rinominare i membri.
+- Test UEFI su mirror root di due membri: diagnostica in sola lettura, voce esistente con file PE/COFF riconosciuto e PARTUUID corretto, conferme backup/manutenzione/console/recupero e seriale prima di `efibootmgr -n`.
+- Riavvio separatamente approvato tramite `shutdown -r +1`, con controlli su identità, stato EFI, BootNext, BootOrder, carichi VM/CT e cluster/HA. Nessun reboot automatico né replay dopo errori.
+- Registro dell'intenzione prima delle scritture, recupero dei test in sospeso, verifica BootCurrent dopo un nuovo boot, registrazione delle variazioni BootOrder senza ripristinarle. L'assenza di SSH resta un esito non determinato.
+- Storico SQLite dedicato, associazione alla sostituzione quando univoca, dettagli/errori persistenti e integrazione nei tre formati di report. Nessun test UEFI modifica le prove di autonomia fisica o completa automaticamente una sostituzione boot.
+- Demo e sola lettura estese; helper sempre senza dipendenze Qt/SSH. Manuale e regressioni aggiornati con identificativi sintetici.
+
 ## 0.4.1 — 11 novembre 2026
 
 - Risolto il falso blocco della nuova ESP: `DEVNAME` nell'export di `blkid` è metadato ammesso solo se coincide con la partizione richiesta. Firme, output ambigui e dati non nulli continuano a bloccare la formattazione.

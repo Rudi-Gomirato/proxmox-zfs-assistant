@@ -51,7 +51,7 @@ def helper_archive():
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         files = {"__main__.py": "from pve_disk_assistant.node import main\nmain()\n",
                  "pve_disk_assistant/__init__.py": (base / "__init__.py").read_text(encoding="utf-8")}
-        for filename in ("core.py", "node.py", "boot.py", "esp.py", "identity.py", "workflow.py"):
+        for filename in ("core.py", "node.py", "boot.py", "esp.py", "identity.py", "workflow.py", "uefi.py", "uefi_service.py"):
             files["pve_disk_assistant/" + filename] = (base / filename).read_text(encoding="utf-8")
         for name, contents in files.items():
             info = zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0))
@@ -151,7 +151,9 @@ class SSHBackend:
             command += ' --read-only'
             if request.get('op') == 'plan':
                 request = {**request, 'op': 'preview'}
-            if request.get('op') not in {'collect', 'version', 'list_jobs', 'preview'}:
+            if request.get('op') == 'uefi_plan':
+                request = {**request, 'op': 'uefi_preview'}
+            if request.get('op') not in {'collect', 'version', 'list_jobs', 'preview', 'uefi_preview'}:
                 raise RuntimeError('Modalità sola lettura: operazione modificativa non consentita.')
         if request.get("op") not in {"collect", "version"}:
             try:

@@ -1,5 +1,7 @@
 # Manuale operativo
 
+Aggiornamento **0.5.0**: [identità persistente e test UEFI con BootNext](test-uefi-0.5.md). Il test del percorso EFI con entrambi i dischi collegati è distinto dalle prove di autonomia fisica descritte sotto. Per la nuova ESP resta valida la [procedura con conferma di formattazione](nuova-esp.md).
+
 Aggiornamento 0.3.0: [comportamento attuale, estensioni e collaudo](collaudo-0.3.md). Le limitazioni precedenti descritte sotto sono aggiornate da questa nota.
 ## Avviare e provare l'app
 

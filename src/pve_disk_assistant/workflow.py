@@ -1,6 +1,7 @@
 """Shared workflow vocabulary and read-only observations; never authorizes writes."""
 from .core import GOOD, disk_for_member, leaves
 from .identity import normalize_wwn
+from .uefi import LABELS as UEFI_LABELS, PENDING as UEFI_PENDING
 
 ACTIVE_STATES = {"QUEUED", "RUNNING", "MONITORING", "WAITING_RESILVER"}
 REVIEW_STATES = {"MONITORING", "WAITING_RESILVER", "BOOT_REVIEW_REQUIRED", "BOOT_TEST_REQUIRED",
@@ -19,17 +20,21 @@ STATE_LABELS = {
 
 
 def state_label(state):
-    return STATE_LABELS.get(state, state or "Non disponibile")
+    return UEFI_LABELS.get(state, STATE_LABELS.get(state, state or "Non disponibile"))
 
 
 def should_refresh(job):
-    return (job.get("state") in REVIEW_STATES | ACTIVE_STATES
+    return (job.get("state") in REVIEW_STATES | ACTIVE_STATES | UEFI_PENDING
             or job.get("action") == "replace" and job.get("state") in {"FAILED", "UNKNOWN"}
             or job.get("role") in {"BOOT", "MISTO"} and job.get("state") == "COMPLETED")
 
 
 def next_step(job):
     state = job.get("state")
+    if job.get('action') == 'uefi_test':
+        return ('Approva separatamente il riavvio dopo aver fermato VM/CT. Console e recupero devono essere disponibili.' if state == 'UEFI_READY_REBOOT' else
+                'Attendi la riconnessione o usa Verifica post-riavvio. Nessun comando modificativo viene ripetuto.' if state in UEFI_PENDING else
+                'Test UEFI distinto dall’autonomia fisica: consulta lo storico in Avvio EFI.')
     if state in {"FAILED", "UNKNOWN", "BLOCKED", "FAILED_TO_START"}:
         return "Aggiorna lo stato reale e consulta il comando non riuscito. Non ripetere GPT, replace o format."
     if state == "ESP_INITIALIZATION_REQUIRED":

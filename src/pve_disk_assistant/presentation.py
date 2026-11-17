@@ -1,9 +1,30 @@
 """Escaped, Qt-free rendering of plans and audit details."""
 import html
+import json
 
 from .workflow import next_step, state_label
+from .core import disk_for_member, leaves, partition_for
 
 e = lambda value: html.escape(str(value))
+
+
+def disk_html(disk, snapshot=None):
+    if not disk:
+        return '<p>Disco non identificato.</p>'
+    primary = disk.get('by_id') if disk.get('identity_verified') else 'Disk by ID non verificato'
+    fields = [('Disk by ID', primary), ('Modello', disk.get('model')), ('Seriale', disk.get('serial')),
+              ('Dispositivo Linux', disk.get('path')), ('WWN', disk.get('wwn') or 'Non disponibile')]
+    for pool in (snapshot or {}).get('pools', []):
+        for member in leaves(pool):
+            if disk_for_member(snapshot, member) == disk:
+                part = partition_for(disk, member['name']) or {}
+                persistent = next((p for p in part.get('aliases', []) if p.startswith('/dev/disk/by-id/')), '')
+                fields += [('Pool / stato', pool['name'] + ' / ' + member['state']), ('GUID ZFS', member.get('guid')),
+                           ('Partizione ZFS', persistent or part.get('path') or member['name']), ('Dispositivo ZFS Linux', part.get('path') or member['name'])]
+    for part in disk.get('partitions', []):
+        if part.get('partuuid'):
+            fields.append(('Partizione / PARTUUID', part['path'] + ' / ' + part['partuuid']))
+    return '<table>' + ''.join('<tr><td><b>' + e(k) + '</b></td><td>' + e(v or 'N/D') + '</td></tr>' for k, v in fields) + '</table>' + ''.join('<p>' + e(w) + '</p>' for w in disk.get('identity_warnings', []))
 
 
 def scan_summary(evidence):
@@ -22,8 +43,17 @@ def scan_summary(evidence):
 
 def plan_html(plan, hostname="?"):
     body = f"<h2>{e(plan['pool'])} · {e(plan['role'])}</h2><p>{e(plan['raid'])}<br>Destinazione: <b>{e(plan['target']['serial'])}</b><br>{e(plan['target']['by_id'])}</p>"
+    if plan.get('action') == 'uefi_test':
+        esp = plan.get('expected_esp') or {}
+        body = ('<h2>Test UEFI · ' + e(hostname) + '</h2><p><b>Voce: Boot' + e(plan.get('entry', {}).get('id', 'non verificata')) +
+                '</b> · ' + e(plan.get('entry', {}).get('file', '')) + '<br>ESP: ' + e(esp.get('path', '')) +
+                ' · UUID: ' + e(esp.get('uuid', '')) + '<br>PARTUUID: ' + e(esp.get('partuuid', '')) +
+                '<br>GUID ZFS: ' + e(plan.get('binding', {}).get('member_guid', '')) + '</p>' + body)
+        if plan.get('read_only'):
+            body = '<p><b>Anteprima in sola lettura: nessun comando modificativo eseguibile.</b></p>' + body
     if plan.get("source"):
         body += "<p>Riferimento: " + e(plan["source"]["serial"]) + "</p>"
+    body += disk_html(plan['target'], plan.get('before'))
     if plan["blocks"]:
         body += "<h3 style='color:#ffacb5'>Controlli non superati · nessuna esecuzione</h3><ul>" + "".join("<li>" + e(b) + "</li>" for b in plan["blocks"]) + "</ul>"
     else:
@@ -49,6 +79,17 @@ def plan_html(plan, hostname="?"):
 def job_html(job):
     body = f"<h2>{e(job.get('pool', 'Intervento'))} · {e(state_label(job['state']))}</h2><p>ID {e(job['id'])} · {e(job['state'])}</p>"
     body += "<p><b>Prossimo passo:</b> " + e(next_step(job)) + "</p>"
+    if job.get('target'):
+        body += disk_html(job['target'], job.get('before'))
+    if job.get('action') == 'uefi_test':
+        body += '<p>Test del percorso UEFI, non prova di autonomia fisica.</p>'
+        for label, value in [('Voce richiesta', job.get('entry')), ('Identità vincolata', job.get('binding')),
+                             ('Prima del test', job.get('boot_before')), ('Dopo BootNext', job.get('boot_after_setting')),
+                             ('Verifica post-riavvio', job.get('observation')), ('Conferme', job.get('confirmations')),
+                             ('Intervento associato', job.get('replacement_id')), ('Errore connessione', job.get('connection_error'))]:
+            body += '<p><b>' + e(label) + '</b></p><pre>' + e(json.dumps(value, indent=2, ensure_ascii=False) if isinstance(value, (dict, list)) else value or 'Non disponibile') + '</pre>'
+        for event in job.get('connection_events', []):
+            body += '<p>Connessione ' + e(event['at']) + ': ' + e(event['error']) + '</p>'
     observation = job.get("system_observation")
     if observation:
         body += "<h3>Stato attuale del nodo: " + e(observation["state"]) + "</h3><p>" + e(observation["detail"]) + "<br>Rilevato: " + e(observation.get("checked_at")) + "</p>"

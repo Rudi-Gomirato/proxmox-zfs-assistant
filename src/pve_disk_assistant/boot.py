@@ -20,21 +20,26 @@ from .core import ESP, GOOD, SafetyError, disk_for_member, leaves, partition_for
 
 
 def parse_boot_entries(text):
-    entries, current, order = [], "", []
+    entries, current, order, next_boot, ids = [], "", [], "", []
     for line in text.splitlines():
         if line.startswith("BootCurrent:"):
             current = line.split(":", 1)[1].strip().upper()
         elif line.startswith("BootOrder:"):
             order = [s.strip().upper() for s in line.split(":", 1)[1].split(",")]
+        elif line.startswith("BootNext:"):
+            next_boot = line.split(":", 1)[1].strip().upper()
         match = re.match(r"Boot([0-9a-fA-F]{4})(\*)?\s+(.*)", line)
         if not match:
             continue
+        ids.append(match[1].upper())
         part = re.search(r"HD\(\d+,GPT,([^,]+),", match[3], re.I)
         file = re.search(r"File\(([^)]+)\)", match[3], re.I)
         if part and file:
             entries.append({"id": match[1].upper(), "active": bool(match[2]),
                             "partuuid": part[1].lower(), "file": normalize_path(file[1])})
-    return {"current": current, "order": order, "entries": entries}
+    invalid = (len(ids) != len(set(ids)) or len(order) != len(set(order)) or
+               any(not re.fullmatch(r'[0-9A-F]{4}', v) for v in [current, *order, *([next_boot] if next_boot else [])]))
+    return {"current": current, "order": order, "next": next_boot, "entries": entries, "ambiguous": invalid}
 
 
 def normalize_path(value):
@@ -211,6 +216,7 @@ def boot_report(snapshot, pool):
         disk = disk_for_member(snapshot, member)
         checks = {}
         record = {"member_guid": member.get("guid", ""), "member_state": member["state"],
+                  "identity_verified": bool(disk and disk.get('identity_verified')),
                   "serial": disk.get("serial", "") if disk else "", "by_id": disk.get("by_id", "") if disk else "",
                   "esp": None, "mode": "unknown", "checks": checks, "configuration_ready": False}
 

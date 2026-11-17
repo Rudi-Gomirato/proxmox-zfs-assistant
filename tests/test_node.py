@@ -174,7 +174,7 @@ def test_collector_uses_pveversion_short_format_and_classifies(monkeypatch):
     monkeypatch.setattr(node, "discover_disks", lambda _: snap["disks"])
     monkeypatch.setattr(node.shutil, "which", lambda name, **kw: "/usr/sbin/" + name)
     monkeypatch.setattr(node, "read_text", lambda p: "zfspool: vm-zfs\n\tpool vmdata/vm\n" if str(p).endswith("storage.cfg") else "HOST-ID")
-    monkeypatch.setattr(node.os, "uname", lambda: SimpleNamespace(nodename="pve-lab"), raising=False)
+    monkeypatch.setattr(node.os, "uname", lambda: SimpleNamespace(nodename="pve-lab", release="synthetic-pve"), raising=False)
     monkeypatch.setattr(node.glob, "glob", lambda _: [])
     result = node.collect()
     assert result["complete"]

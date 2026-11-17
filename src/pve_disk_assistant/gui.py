@@ -28,7 +28,9 @@ from .transport import Connection, HostVerificationRequired, SSHBackend
 
 from .ui_theme import STYLE, color_for
 from .ui_widgets import SectionStack, ProcedureNotice, DetailsPanel
-from .presentation import plan_html, job_html
+from .presentation import plan_html, job_html, disk_html
+from .ui_uefi import UefiMixin
+from .uefi import PENDING as UEFI_PENDING, LABELS as UEFI_LABELS
 from .workflow import ACTIVE_STATES, next_step, state_label, should_refresh
 
 
@@ -53,7 +55,7 @@ class Worker(QThread):
             self.error.emit(exc)
 
 
-class Window(QMainWindow):
+class Window(UefiMixin, QMainWindow):
     def __init__(self, directory, demo=True):
         super().__init__()
         self.setWindowTitle("Proxmox ZFS Assistant")
@@ -180,6 +182,7 @@ class Window(QMainWindow):
         self.button("Prepara sostituzione", lambda: self.tabs.setCurrentIndex(2), shortcuts, network=False)
         self.button("Controlla avvio EFI", lambda: self.tabs.setCurrentIndex(5), shortcuts, network=False)
         self.button("Segui interventi", lambda: self.tabs.setCurrentIndex(3), shortcuts, network=False)
+        self.button('Copia Disk by ID', lambda: self.copy_disk_id('overview'), shortcuts, network=False)
         shortcuts.addStretch()
         layout.addLayout(shortcuts)
         cards = QHBoxLayout()
@@ -197,6 +200,9 @@ class Window(QMainWindow):
             cards.addWidget(frame)
             self.card_values[key] = large
         layout.addLayout(cards)
+        self.system_disks = QTextBrowser()
+        self.system_disks.setMaximumHeight(125)
+        layout.addWidget(self.system_disks)
         split = QSplitter()
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Pool / vdev / membro", "Ruolo o tipo", "Stato", "GUID"])
@@ -219,8 +225,8 @@ class Window(QMainWindow):
         note = QLabel("Identifica sempre il supporto con seriale e posizione. SATA diretto può non offrire LED comandabili.")
         note.setWordWrap(True)
         layout.addWidget(note)
-        self.disk_table = QTableWidget(0, 8)
-        self.disk_table.setHorizontalHeaderLabels(["Disco", "Seriale", "Modello", "Capacità", "Uso", "SMART", "Posizione", "LED locate"])
+        self.disk_table = QTableWidget(0, 13)
+        self.disk_table.setHorizontalHeaderLabels(["Disk by ID", "Seriale", "Modello", "Capacità", "Uso", "SMART", "Posizione", "LED locate", "Dispositivo Linux", "WWN", "GUID ZFS / partizione", "Identità", "ESP / PARTUUID"])
         self.disk_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.disk_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.disk_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -231,6 +237,7 @@ class Window(QMainWindow):
         self.button("Registra posizione / etichetta", self.edit_position, actions, network=False)
         self.button("Identifica per 30 secondi", self.identify, actions)
         self.button("Mostra diagnostica SMART", self.show_smart, actions, network=False)
+        self.button('Copia Disk by ID', lambda: self.copy_disk_id('diagnosis'), actions, network=False)
         actions.addStretch()
         layout.addLayout(actions)
         self.tabs.addTab(tab, "Dischi")
@@ -269,6 +276,7 @@ class Window(QMainWindow):
         self.plan_view = QTextBrowser()
         self.plan_view.setPlaceholderText("Seleziona pool, membro guasto e nuovo disco. Nessuna modifica parte dall'anteprima.")
         layout.addWidget(self.plan_view, 1)
+        self.button('Copia Disk by ID del piano', lambda: self.copy_disk_id('replacement'), layout, network=False)
         approval = QVBoxLayout()
         self.backup = QCheckBox("Backup verificato e manutenzione concordata")
         self.physical = QCheckBox("Identità e posizione del nuovo disco verificate")
@@ -287,13 +295,14 @@ class Window(QMainWindow):
         self.button("Registra prova di avvio autonomo", self.record_boot_result, actions)
         self.continue_esp_button = self.button("Prosegui con nuova ESP", self.preview_job_esp, actions, "primary")
         self.continue_esp_button.setEnabled(False)
+        self.button('Copia Disk by ID', lambda: self.copy_disk_id('jobs'), actions, network=False)
         actions.addStretch()
         layout.addLayout(actions)
         self.job_notice = ProcedureNotice("Seleziona un intervento", "Recupera gli interventi dal nodo per vedere il passaggio corrente e la prossima azione.",
                                           "Preparazione → Ricostruzione ZFS → Configurazione EFI → Prove di avvio")
         layout.addWidget(self.job_notice)
         self.job_table = QTableWidget(0, 4)
-        self.job_table.setHorizontalHeaderLabels(["Intervento", "Pool", "Destinazione", "Stato"])
+        self.job_table.setHorizontalHeaderLabels(["Intervento", "Pool", "Disk by ID / seriale", "Stato"])
         self.job_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.job_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.job_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -389,8 +398,9 @@ class Window(QMainWindow):
                     lambda: self.preview_boot_repair(action='initialize_esp'), initialization, 'primary')
         actions.addStretch()
         layout.addLayout(actions)
-        self.boot_table = QTableWidget(0, 8)
-        self.boot_table.setHorizontalHeaderLabels(["Pool", "Seriale", "ESP", "FAT32 / coerenza", "Registro", "Loader / kernel", "Percorso UEFI", "Esito"])
+        self.boot_table = QTableWidget(0, 10)
+        self.boot_table.setMaximumHeight(145)
+        self.boot_table.setHorizontalHeaderLabels(["Pool", "Disk by ID / seriale", "ESP", "FAT32 / coerenza", "Registro", "Loader / kernel", "Percorso UEFI", "Esito EFI", "Voce UEFI", "Ultimo test UEFI"])
         self.boot_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.boot_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.boot_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -400,6 +410,7 @@ class Window(QMainWindow):
         layout.addWidget(self.boot_table, 1)
         self.boot_detail = QTextBrowser()
         layout.addWidget(self.boot_detail, 1)
+        self.build_uefi_controls(layout)
         self.tabs.addTab(tab, "Avvio EFI")
 
     def update_action_states(self):
@@ -418,6 +429,9 @@ class Window(QMainWindow):
         for button in (self.initialize_esp_button, self.repair_esp_button, self.clean_esp_button):
             button.setEnabled(present)
             button.setToolTip('Il nodo rivalida tutti i prerequisiti prima dell’approvazione.' if present else 'Seleziona un disco fisico identificato nella tabella EFI.')
+        self.uefi_diagnose_button.setEnabled(present and bool(self.backend))
+        self.uefi_test_button.setEnabled(present and bool(self.backend))
+        self.select_uefi_test()
 
     def render_boot(self):
         self.boot_rows = []
@@ -434,10 +448,16 @@ class Window(QMainWindow):
             checks = disk["checks"]
             def states(*keys):
                 return " / ".join(checks.get(k, {}).get("state", "UNKNOWN") for k in keys)
-            values = [item["pool"]["name"], disk["serial"] or "Membro assente", (disk.get("esp") or {}).get("path", "Non rilevata"),
-                      states("fat32", "filesystem"), states("registration"), states("loader", "configuration"), states("uefi_path"), disk.get("state", "UNKNOWN")]
+            part = disk.get('esp') or {}
+            entries = [e['id'] for e in self.snapshot.get('boot', {}).get('nvram', {}).get('entries', []) if e.get('partuuid', '').lower() == part.get('partuuid', '').lower()]
+            tests = [r for r in self.store.uefi_tests(self.snapshot['host_id']) if r['target']['serial'] == disk['serial']]
+            latest = tests[-1] if tests else {}
+            values = [item["pool"]["name"], (disk.get('by_id') if disk.get('identity_verified') else 'Disk by ID non verificato') + ' / ' + (disk['serial'] or 'Membro assente'), part.get("path", "Non rilevata"),
+                      states("fat32", "filesystem"), states("registration"), states("loader", "configuration"), states("uefi_path"), disk.get("state", "UNKNOWN"),
+                      ', '.join(entries) or 'Non associata', UEFI_LABELS.get(latest.get('state'), 'Test UEFI non eseguito')]
             for col, value in enumerate(values):
                 cell = QTableWidgetItem(value)
+                cell.setToolTip(value)
                 if col == 7:
                     cell.setForeground(color_for(value))
                 self.boot_table.setItem(index, col, cell)
@@ -445,6 +465,14 @@ class Window(QMainWindow):
         value = "CONFIG. OK" if ready else "DA VERIFICARE" if reports else "NON RILEVATA"
         self.card_values["boot"].setText(value)
         self.card_values["boot"].setStyleSheet("color:" + ("#71d7b3" if ready else "#f4bf65"))
+        self.render_uefi_history()
+        summary = '<b>Dischi di sistema · configurazione EFI e test UEFI separati</b>'
+        for item in self.boot_rows:
+            row = item['disk']
+            tests = [r for r in self.uefi_records if r['target']['serial'] == row['serial']]
+            summary += '<p>' + html.escape((row.get('by_id') if row.get('identity_verified') else 'Identità non verificata') + ' · ' + row['serial'] + ' · ZFS ' + row['member_state'] +
+                ' · EFI ' + row.get('state', 'UNKNOWN') + ' · ' + UEFI_LABELS.get(tests[0]['state'] if tests else '', 'Test UEFI non eseguito')) + '</p>'
+        self.system_disks.setHtml(summary)
         if self.boot_rows:
             self.boot_table.selectRow(0)
             self.boot_selected()
@@ -463,6 +491,15 @@ class Window(QMainWindow):
         disk = entry["disk"]
         e = html.escape
         body = f"<h2>{e(disk['serial'] or 'Membro non identificato')}</h2><p>Firmware: {e(entry['report']['firmware_mode'])} · loader: {e(disk['mode'])}</p>"
+        physical = next((d for d in self.snapshot['disks'] if d.get('by_id') == disk.get('by_id')), None)
+        body += disk_html(physical, self.snapshot)
+        part = disk.get('esp') or {}
+        body += '<p>UUID ESP: ' + e(part.get('uuid', 'N/D')) + ' · PARTUUID: ' + e(part.get('partuuid', 'N/D')) + '</p>'
+        nvram = self.snapshot.get('boot', {}).get('nvram', {})
+        body += '<p>BootCurrent: ' + e(nvram.get('current', 'N/D')) + ' · BootNext: ' + e(nvram.get('next') or 'non impostato') + ' · BootOrder: ' + e(','.join(nvram.get('order', []))) + '</p>'
+        for firmware_entry in nvram.get('entries', []):
+            if firmware_entry.get('partuuid', '').lower() == part.get('partuuid', '').lower():
+                body += '<p>Voce UEFI: Boot' + e(firmware_entry['id']) + ' · ' + e(firmware_entry['file']) + '</p>'
         body += "<p>Lettura voci UEFI (efibootmgr): " + ("disponibile" if entry["report"]["nvram_readable"] else "non disponibile") + ".</p>"
         for name, check in disk["checks"].items():
             body += f"<p><b>{e(name)} · {e(check['state'])}</b><br>{e(check['detail'])}</p>"
@@ -470,7 +507,8 @@ class Window(QMainWindow):
             body += "<p>Avvisi registro ESP: " + e("; ".join(entry["report"]["warnings"])) + "</p>"
         body += "<p><b>Avvio autonomo: NON TESTATO.</b> Configurazione e file non provano che il firmware avvierà il disco. Secure Boot: firme non certificate dall'app.</p>"
         self.boot_detail.setHtml(body)
-        self.boot_notice.title.setText("Disco: " + (disk['serial'] or 'non identificato'))
+        configuration = 'EFI configurata' if disk.get('state') == 'OK' else 'EFI da riparare' if disk.get('state') == 'ERROR' else 'EFI da verificare'
+        self.boot_notice.title.setText(configuration + ' · ' + (disk['serial'] or 'disco non identificato'))
         self.boot_notice.description.setText("ESP esistente: usa il ripristino se FAT32 è coerente. Nuovo ricambio: usa l'inizializzazione con conferma di format. ZFS ONLINE non certifica il boot.")
         self.update_action_states()
 
@@ -713,7 +751,7 @@ class Window(QMainWindow):
             def append(parent, nodes):
                 for node in nodes:
                     disk = disk_for_member(snapshot, node)
-                    label = disk["serial"] if disk and not node["children"] else node["name"]
+                    label = (disk.get('by_id') if disk.get('identity_verified') else disk['serial']) if disk and not node["children"] else node["name"]
                     child = QTreeWidgetItem([label, node["kind"].upper(), node["state"], node["guid"]])
                     child.setToolTip(0, node["name"])
                     child.setData(0, Qt.ItemDataRole.UserRole, (pool["guid"], node["guid"] or node["name"]))
@@ -737,6 +775,7 @@ class Window(QMainWindow):
         self.render_boot()
         problems = snapshot["issues"] + [w for p in snapshot["pools"] for w in p.get("warnings", [])]
         problems += snapshot.get('hardware_notes', [])
+        problems += [w for d in snapshot['disks'] for w in d.get('identity_warnings', [])]
         if snapshot.get("helper_version") != __version__:
             problems.append("Helper da aggiornare alla versione " + __version__ + ": piani e interventi non abilitati.")
         if any(not row["report"]["configuration_ready"] for row in self.boot_rows):
@@ -774,10 +813,14 @@ class Window(QMainWindow):
             smart = disk.get("smart", {})
             health = "ALLARME" if smart.get("passed") is False or smart.get("exit_code", 0) & 248 else "OK" if smart.get("passed") is True and not smart.get("exit_code", 0) & 7 else "NON NOTO"
             usage = ", ".join(pools) or ("Firme / partizioni" if disk.get("partitions") or disk.get("signatures") else "Libero da verificare")
-            values = [disk["path"], disk["serial"], disk.get("model", ""), size_text(disk["size"]), usage, health,
-                      self.store.position(self.snapshot["host_id"], disk["serial"]), "Disponibile" if disk.get("locate_paths") else "Non rilevato"]
+            members = [m for p in self.snapshot['pools'] for m in leaves(p) if disk_for_member(self.snapshot, m) == disk]
+            values = [disk.get('by_id') if disk.get('identity_verified') else 'Non verificato', disk["serial"], disk.get("model", ""), size_text(disk["size"]), usage, health,
+                      self.store.position(self.snapshot["host_id"], disk["serial"]), "Disponibile" if disk.get("locate_paths") else "Non rilevato", disk['path'], disk.get('wwn') or 'N/D',
+                      ' | '.join(m.get('guid', '') + ' / ' + m['name'] for m in members), '; '.join(disk.get('identity_warnings', [])) or ('Verificata' if disk.get('identity_verified') else 'Ambigua'),
+                      ' | '.join(p['path'] + ' / ' + p.get('partuuid', '') for p in disk.get('partitions', []) if p.get('parttype', '').lower() == 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b')]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
+                item.setToolTip(value)
                 if col == 5:
                     item.setForeground(color_for("FAULTED" if health == "ALLARME" else "ONLINE" if health == "OK" else "UNKNOWN"))
                 self.disk_table.setItem(row, col, item)
@@ -792,13 +835,13 @@ class Window(QMainWindow):
             for member in leaves(pool):
                 if member["state"] in BAD:
                     disk = disk_for_member(self.snapshot, member)
-                    label = disk["serial"] if disk else member["name"]
+                    label = (disk.get('by_id') or disk['serial']) if disk else member["name"]
                     self.old_combo.addItem(f"{label} · {member['state']} · GUID {member['guid']}", member["guid"])
         self.target_combo.clear()
         used = [disk_for_member(self.snapshot, m) for p in self.snapshot["pools"] for m in leaves(p)]
         for disk in self.snapshot["disks"]:
             if disk not in used and disk.get("by_id") and not disk.get("partitions") and not disk.get("signatures"):
-                self.target_combo.addItem(f"{disk['serial']} · {size_text(disk['size'])} · {disk['path']}", disk["by_id"])
+                self.target_combo.addItem(f"{disk['by_id']} · {disk['serial']} · {disk['path']}", disk["by_id"])
 
     def current_pool(self):
         return next((p for p in (self.snapshot or {}).get("pools", []) if p["guid"] == self.pool_combo.currentData()), None)
@@ -847,6 +890,7 @@ class Window(QMainWindow):
                 disk, historical = self.member_disk(member)
                 body += "<h3>Membro selezionato</h3><p>" + html.escape(member["name"]) + "<br>GUID " + html.escape(member["guid"]) + "</p>"
                 if disk:
+                    body += disk_html(disk, self.snapshot)
                     position = self.store.position(self.snapshot["host_id"], disk["serial"]) or "Non registrata"
                     body += f"<p><b>Seriale:</b> {html.escape(disk['serial'])}<br><b>Posizione:</b> {html.escape(position)}</p>"
                     if historical:
@@ -1024,6 +1068,9 @@ class Window(QMainWindow):
         self.asynchronous(get, self.render_jobs, "Recupero degli interventi persistenti sul nodo…")
 
     def render_jobs(self, jobs):
+        for record in jobs:
+            if record.get('action') == 'uefi_test':
+                self.store.save_uefi_test(record)
         if self.snapshot and not self.is_demo():
             self.store.set('jobs:' + self.snapshot['host_id'], jobs)
         selected_id = self.jobs[self.job_table.currentRow()]['id'] if 0 <= self.job_table.currentRow() < len(self.jobs) else None
@@ -1031,7 +1078,9 @@ class Window(QMainWindow):
         self.job_table.blockSignals(True)
         self.job_table.setRowCount(len(self.jobs))
         for row, job in enumerate(self.jobs):
-            for col, val in enumerate((job["id"][:12], job.get("pool", ""), job.get("target", {}).get("serial", ""), state_label(job["state"]))):
+            target = job.get('target', {})
+            identity = (target.get('by_id', '') if target.get('identity_verified') else 'Non verificato') + ' / ' + target.get('serial', '')
+            for col, val in enumerate((job["id"][:12], job.get("pool", ""), identity, state_label(job["state"]))):
                 item = QTableWidgetItem(val)
                 item.setToolTip(job['state'] if col == 3 else val)
                 if col == 3:
@@ -1078,7 +1127,7 @@ class Window(QMainWindow):
         if row < 0 or row >= len(self.jobs) or self.is_demo():
             return
         job = self.jobs[row]
-        if job.get("role") not in {"BOOT", "MISTO"} or job.get("action") == "offline":
+        if job.get("role") not in {"BOOT", "MISTO"} or job.get("action") in {"offline", "uefi_test"}:
             QMessageBox.information(self, "Avvio autonomo", "Seleziona un intervento di boot o ripristino EFI.")
             return
         serials = [s for s in (job.get("target", {}).get("serial"), (job.get("source") or {}).get("serial")) if s]
@@ -1117,6 +1166,7 @@ class Window(QMainWindow):
         if path:
             report = {**self.snapshot, "boot_reports": [boot_report(self.snapshot, p) for p in self.snapshot["pools"] if p.get("role") in {"BOOT", "MISTO"}]}
             report['interventions'] = self.jobs or self.store.get('jobs:' + self.snapshot['host_id'], [])
+            report['uefi_tests'] = self.store.uefi_tests(self.snapshot['host_id'])
             rendered = json.dumps(anonymize(report), indent=2, ensure_ascii=False)
             document = '<h1>Rapporto Proxmox ZFS Assistant</h1><p>Dati anonimizzati; avvio fisico separato dallo stato ZFS.</p><pre>' + html.escape(rendered) + '</pre>'
             if Path(path).suffix.lower() == '.pdf':
@@ -1132,6 +1182,11 @@ class Window(QMainWindow):
 
     def _poll(self):
         if self.busy or not self.backend:
+            return
+        if self.snapshot and any(r['state'] in UEFI_PENDING for r in self.store.uefi_tests(self.snapshot['host_id'])):
+            import time
+            if time.monotonic() - self.uefi_last_attempt >= 20:
+                self.refresh_uefi(True)
             return
         if any(j.get("state") in ACTIVE_STATES or j.get('system_observation', {}).get('state') == 'RESILVERING' for j in self.jobs):
             self.refresh_jobs()

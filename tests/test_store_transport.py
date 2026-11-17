@@ -15,7 +15,7 @@ def test_password_is_not_in_connection_repr():
 
 def test_helper_contains_only_standard_library_domain_and_node():
     with zipfile.ZipFile(io.BytesIO(helper_archive())) as archive:
-        assert set(archive.namelist()) == {"__main__.py", "pve_disk_assistant/__init__.py", "pve_disk_assistant/core.py", "pve_disk_assistant/node.py", "pve_disk_assistant/boot.py", "pve_disk_assistant/esp.py", "pve_disk_assistant/identity.py", "pve_disk_assistant/workflow.py"}
+        assert set(archive.namelist()) == {"__main__.py", "pve_disk_assistant/__init__.py", "pve_disk_assistant/core.py", "pve_disk_assistant/node.py", "pve_disk_assistant/boot.py", "pve_disk_assistant/esp.py", "pve_disk_assistant/identity.py", "pve_disk_assistant/workflow.py", "pve_disk_assistant/uefi.py", "pve_disk_assistant/uefi_service.py"}
         assert "paramiko" not in archive.read("pve_disk_assistant/node.py").decode()
 
 
@@ -42,7 +42,7 @@ def test_old_helper_cannot_execute_or_certify_new_boot_workflow(tmp_path):
         calls.append(request["op"])
         return {"version": "0.1.0", "schema": 1}
     backend._call = call
-    for operation in ("plan", "submit", "status", "record_boot_test"):
+    for operation in ("plan", "submit", "status", "record_boot_test", "uefi_plan", "uefi_set_next", "uefi_reboot"):
         with pytest.raises(RuntimeError, match="helper incompatibile"):
             backend.rpc({"op": operation})
     assert set(calls) == {"version"}
