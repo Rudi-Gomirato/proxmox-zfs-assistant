@@ -51,6 +51,10 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements-dev.txt
       - run: python scripts/build_windows.py
+      - name: Build Windows installer
+        run: python scripts/build_installer.py
+      - name: Smoke test installer and uninstall
+        run: python scripts/smoke_installer.py
       - name: Smoke test packaged application
         shell: pwsh
         env:
@@ -69,4 +73,5 @@ jobs:
           name: ProxmoxZfsAssistant-Windows
           path: |
             dist/ProxmoxZfsAssistant-Windows.zip
+            dist/*-Windows-Setup.exe
             dist/SHA256SUMS.txt

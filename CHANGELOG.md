@@ -2,6 +2,8 @@
 
 ## 0.5.0 — 17 novembre 2026
 
+- Distribuzione Windows anche come installer EXE per utente, con tutte le librerie e licenze, collegamenti e disinstallazione senza cancellare i dati locali dell'app. Build riproducibile dallo script Inno Setup incluso; SHA256 pubblicati con gli asset.
+
 - Inventario: preferenza per alias by-id contenenti il seriale, risoluzione dei symlink esistenti, avvisi WWN duplicati, blocchi su seriali/alias/PARTUUID ambigui. La risoluzione non sceglie più il primo disco in caso di alias condiviso.
 - Identificativi persistenti e pulsanti copia in Panoramica, Diagnosi, Sostituzione, Interventi e Avvio EFI; correlazione con modello, seriale, WWN, GUID ZFS e partizioni. Nessun export/import del pool per rinominare i membri.
 - Test UEFI su mirror root di due membri: diagnostica in sola lettura, voce esistente con file PE/COFF riconosciuto e PARTUUID corretto, conferme backup/manutenzione/console/recupero e seriale prima di `efibootmgr -n`.

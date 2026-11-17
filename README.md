@@ -14,6 +14,8 @@ In questa cartella esegui `avvia.cmd`. Se parti da un clone nuovo, installa Pyth
 
 Per il pacchetto compilato, estrai l'intero ZIP e avvia `ProxmoxZfsAssistant.exe`. Conserva tutte le librerie e le licenze della distribuzione.
 
+Puoi anche scaricare **ProxmoxZfsAssistant-0.5.0-Windows-Setup.exe** dalla [release 0.5.0](https://github.com/Rudi-Gomirato/proxmox-zfs-assistant/releases/tag/v0.5.0): installa app, librerie e licenze per l'utente corrente, senza richiedere Python. L'installer crea il collegamento nel menu Start e offre quello sul desktop. La disinstallazione conserva database, profili e chiavi host dell'app. Il pacchetto non è firmato digitalmente; confronta il suo SHA256 con `SHA256SUMS.txt` pubblicato nella stessa release.
+
 ## Novità 0.5.0
 
 - Disk by ID verificato in primo piano, copia del percorso e correlazione con seriale, WWN, GUID ZFS, dispositivo Linux e PARTUUID. Alias basati sul seriale preferiti; WWN duplicati segnalati senza impedire la diagnosi.
