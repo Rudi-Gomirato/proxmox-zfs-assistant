@@ -31,7 +31,8 @@ def verify_empty_signatures(probe, wipe, path=None):
             metadata_only = False
         if key == "DEVNAME":
             # util-linux emits DEVNAME before the GPT tags in export mode.
-            metadata_only &= bool(path and value == path)
+            metadata_only &= bool(path and (value == path or value.startswith("/dev/") and
+                                  os.path.realpath(value) == os.path.realpath(path)))
         elif key not in allowed:
             metadata_only = False
         tags[key] = value

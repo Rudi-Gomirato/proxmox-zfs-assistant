@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QTextDocument
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
-    QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
+    QFileDialog, QDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QPlainTextEdit,
     QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
     QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QProgressBar, QListWidget)
@@ -396,6 +396,8 @@ class Window(UefiMixin, QMainWindow):
         layout.addLayout(initialization)
         self.initialize_esp_button = self.button('Inizializza nuova ESP dopo sostituzione disco',
                     lambda: self.preview_boot_repair(action='initialize_esp'), initialization, 'primary')
+        self.register_entry_button = self.button('Registra voce UEFI mancante',
+                    lambda: self.preview_boot_repair(action='register_uefi'), initialization)
         actions.addStretch()
         layout.addLayout(actions)
         self.boot_table = QTableWidget(0, 10)
@@ -420,15 +422,25 @@ class Window(UefiMixin, QMainWindow):
         job = self.jobs[index] if 0 <= index < len(self.jobs) else {}
         can_continue = (job.get('action') == 'replace' and job.get('role') in {'BOOT', 'MISTO'}
                         and job.get('state') in {'ESP_INITIALIZATION_REQUIRED', 'BOOT_REVIEW_REQUIRED'})
+        can_continue = can_continue or (job.get('state') == 'EFI_REPAIR_REQUIRED' and bool(job.get('replacement_id')))
         self.continue_esp_button.setEnabled(can_continue)
         self.continue_esp_button.setToolTip('Prepara il piano EFI del ricambio selezionato.' if can_continue else
             'Seleziona una sostituzione di boot con ZFS ricostruito e fase EFI da completare. Aggiorna prima lo stato del nodo.')
         index = self.boot_table.currentRow()
         row = self.boot_rows[index]['disk'] if 0 <= index < len(self.boot_rows) else {}
         present = bool(row.get('by_id'))
-        for button in (self.initialize_esp_button, self.repair_esp_button, self.clean_esp_button):
-            button.setEnabled(present)
-            button.setToolTip('Il nodo rivalida tutti i prerequisiti prima dell’approvazione.' if present else 'Seleziona un disco fisico identificato nella tabella EFI.')
+        part = row.get('esp') or {}
+        info = (self.snapshot or {}).get('boot', {}).get('esps', {}).get(part.get('path'), {})
+        fat = row.get('checks', {}).get('fat32', {}).get('state') == 'OK'
+        self.initialize_esp_button.setEnabled(present and bool(part) and not fat and
+            not info.get('probe', {}).get('TYPE') and info.get('signatures') == [])
+        self.repair_esp_button.setEnabled(present and fat)
+        self.clean_esp_button.setEnabled(present and bool((self.snapshot or {}).get('boot', {}).get('missing_uuids')))
+        self.register_entry_button.setEnabled(present and fat and not row.get('nvram_entry_ids'))
+        self.initialize_esp_button.setToolTip('Richiede una ESP GPT identificata e priva di firme. Per FAT32 esistente usare Ripristino.')
+        self.repair_esp_button.setToolTip('Richiede FAT32 rilevata da blkid e controllo di coerenza sul nodo.')
+        self.clean_esp_button.setToolTip('Richiede UUID registrati assenti e due ESP configurate.')
+        self.register_entry_button.setToolTip('Richiede ESP configurata, loader verificabile sul disco alternativo e voce firmware mancante.')
         self.uefi_diagnose_button.setEnabled(present and bool(self.backend))
         self.uefi_test_button.setEnabled(present and bool(self.backend))
         self.select_uefi_test()
@@ -521,29 +533,56 @@ class Window(UefiMixin, QMainWindow):
             QMessageBox.information(self, "ESP", "Disco fisico non identificato: nessun ripristino automatico.")
             return
         self.invalidate_plan()
-        self.pool_combo.setCurrentIndex(self.pool_combo.findData(row["pool"]["guid"]))
         request = {"action": action, "pool_guid": row["pool"]["guid"], "target": row["disk"]["by_id"]}
-        def show(plan):
-            self.tabs.setCurrentIndex(2)
-            self.render_plan(plan)
-        self.asynchronous(lambda: self.backend.rpc({"op": "plan", "request": request}), show, "Verifica del piano di ripristino della sola ESP…")
+        self.asynchronous(lambda: self.backend.rpc({"op": "plan", "request": request}), self.show_efi_plan, "Verifica del piano EFI sul nodo…")
 
     def preview_job_esp(self):
         index = self.job_table.currentRow()
         if not 0 <= index < len(self.jobs):
             return
         job = self.jobs[index]
-        if job.get('action') != 'replace' or job.get('role') not in {'BOOT', 'MISTO'}:
+        parent = job.get('replacement_id') if job.get('state') == 'EFI_REPAIR_REQUIRED' else job.get('id') if job.get('action') == 'replace' else None
+        if not parent or job.get('role') not in {'BOOT', 'MISTO'}:
             QMessageBox.information(self, 'Nuova ESP', 'Seleziona la sostituzione del disco del mirror di boot.')
             return
         self.invalidate_plan()
-        request = {'action': 'initialize_esp', 'pool_guid': job['pool_guid'],
-                   'target': job['target']['by_id'], 'replacement_id': job['id']}
-        def show(plan):
-            self.tabs.setCurrentIndex(2)
-            self.render_plan(plan)
-        self.asynchronous(lambda: self.backend.rpc({'op': 'plan', 'request': request}), show,
+        request = {'action': 'continue_esp', 'pool_guid': job['pool_guid'], 'replacement_id': parent}
+        self.asynchronous(lambda: self.backend.rpc({'op': 'plan', 'request': request}), self.show_efi_plan,
                           'Verifica sostituzione e lettura integrale della nuova ESP…')
+
+    def show_efi_plan(self, plan):
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setWindowTitle({'repair_boot': 'Ripristino ESP FAT32', 'initialize_esp': 'Inizializzazione nuova ESP',
+                               'clean_boot': 'Pulizia UUID assenti', 'register_uefi': 'Registrazione voce UEFI'}[plan['action']])
+        dialog.resize(780, 650)
+        layout = QVBoxLayout(dialog)
+        view = QTextBrowser()
+        view.setHtml(plan_html(plan, (self.snapshot or {}).get('hostname', '?')))
+        layout.addWidget(view)
+        backup = QCheckBox('Backup e finestra di manutenzione verificati')
+        physical = QCheckBox('Ho verificato il seriale e la destinazione indicati nel piano')
+        if plan.get('action') == 'clean_boot':
+            physical.setText('Confermo la rimozione degli UUID assenti: ' + ', '.join(plan['missing_uuids']))
+        elif plan.get('action') in {'initialize_esp', 'repair_boot'}:
+            physical.setText('Disco verificato. Autorizzo init e gli eventuali aggiornamenti firmware del bootloader, incluso BootOrder.')
+        layout.addWidget(backup)
+        layout.addWidget(physical)
+        backend = self.backend
+        approve = QPushButton('Approva piano EFI')
+        approve.setEnabled(False)
+        def toggle():
+            approve.setEnabled(backup.isChecked() and physical.isChecked() and not plan['blocks']
+                               and not plan.get('read_only') and self.writable_uefi())
+        backup.toggled.connect(toggle)
+        physical.toggled.connect(toggle)
+        approve.clicked.connect(dialog.accept)
+        dialog.accepted.connect(lambda: self.execute_approved(plan) if self.backend is backend else None)
+        layout.addWidget(approve)
+        close = QPushButton('Chiudi')
+        close.clicked.connect(dialog.reject)
+        layout.addWidget(close)
+        dialog.open()
 
     def asynchronous(self, function, callback, label, retry=True):
         if self.busy:
@@ -1031,12 +1070,19 @@ class Window(UefiMixin, QMainWindow):
         if not self.backup.isChecked() or not self.physical.isChecked():
             QMessageBox.information(self, "Approvazione", "Conferma backup/manutenzione e identificazione fisica del ricambio.")
             return
-        label = "disco da escludere" if plan.get("action") == "offline" else "disco di cui ripristinare SOLO l'ESP" if plan.get("action") in {"repair_boot", "clean_boot"} else "disco nuovo da inizializzare"
+        self.execute_approved(plan)
+
+    def execute_approved(self, plan):
+        if self.busy or plan['blocks'] or plan.get('read_only') or self.is_demo():
+            return
+        label = "disco da escludere" if plan.get("action") == "offline" else "disco selezionato"
         serial, ok = QInputDialog.getText(self, "Approvazione del piano", "Digita il seriale del SOLO " + label + ":\n" + plan["target"]["serial"])
         if not ok:
             return
         request = {"op": "submit", "id": plan["id"], "approval_digest": plan["approval_digest"],
                    "serial_confirmation": serial.strip(), "backup_confirmed": True, "physical_confirmed": True}
+        if plan.get('action') == 'clean_boot':
+            request['cleanup_confirmation'] = plan['missing_uuids']
         if plan.get('action') == 'initialize_esp':
             esp = plan['expected_esp']
             message = ("Autorizzi la FORMATTAZIONE FAT32 della sola nuova ESP?"
@@ -1181,7 +1227,7 @@ class Window(UefiMixin, QMainWindow):
             QMessageBox.information(self, "Rapporto esportato", "Campi identificativi e output grezzi rimossi o mascherati. Rivedi comunque il file prima di pubblicarlo.")
 
     def _poll(self):
-        if self.busy or not self.backend:
+        if self.busy or not self.backend or QApplication.activeModalWidget():
             return
         if self.snapshot and any(r['state'] in UEFI_PENDING for r in self.store.uefi_tests(self.snapshot['host_id'])):
             import time

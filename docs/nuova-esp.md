@@ -1,4 +1,4 @@
-# Inizializza nuova ESP dopo sostituzione disco — aggiornato a 0.4.1
+# Inizializza nuova ESP dopo sostituzione disco — 0.5.1
 
 Questa procedura completa dall'app la fase EFI di una sostituzione del mirror root ZFS. È distinta dal **Piano ripristino della sola ESP selezionata**, che richiede una FAT32 già coerente e non propone mai una formattazione.
 
@@ -20,7 +20,7 @@ Aggiornare il client Windows e, dalla scheda **Connessione**, usare **Installa /
 - `blkid -p` e `wipefs --json` devono escludere firme. Un risultato `blkid` contenente solo metadati GPT `PART_ENTRY_*` è distinto da un filesystem: il solo codice di uscita non basta.
 - Lettura in sola lettura di **tutti i byte dell'ESP**: devono essere nulli. Non si usano campionamenti. Dimensione verificata sul dispositivo a blocchi, massimo 4 GiB, scadenza della lettura 60 secondi. Errori, letture incomplete, firme sconosciute o anche un solo byte non nullo bloccano il piano.
 
-I controlli vengono ripetuti all'approvazione, all'avvio del worker e subito prima del format. L'app serializza i propri interventi sul nodo; durante la manutenzione non modificare gli stessi dischi con altri strumenti.
+I controlli vengono ripetuti all'approvazione, all'avvio del worker e subito prima del format. Durante la manutenzione lasciare i dischi in gestione al solo intervento approvato. Il comando Proxmox `init` richiama l’installer del bootloader, che può aggiornare il firmware. Prima dell’esecuzione la GUI richiede di autorizzare anche questo effetto. Lo storico confronta BootOrder con l’anteprima. Il piano separato per registrare una voce mancante usa invece `--create-only`.
 
 Un ricambio usato può avere dati residui anche senza firme: non è considerato vuoto. La procedura non cancella quei dati per aggirare il blocco. Un registro storico privo di WWN, PARTUUID o esito del replace non viene ricostruito sulla base di una dichiarazione dell'utente: resta necessaria una diagnosi dedicata.
 
@@ -52,7 +52,11 @@ La diagnostica finale verifica UUID, registrazione, filesystem, bootloader, conf
 | `BOOT_TEST_PENDING` | Configurazione verificata; mancano le prove fisiche di avvio autonomo. |
 | `COMPLETED` | Entrambi gli avvii autonomi registrati e verificati, mirror nuovamente ONLINE e configurazione ancora coerente. |
 
-Gli stati storici `BOOT_TEST_REQUIRED` sono letti e rivalutati. Le vecchie riprese automatiche EFI non autorizzano più una formattazione. Un comando fallito o di esito ignoto non viene ripetuto automaticamente. Se FAT32 è stata creata ma `init` è fallito, aggiornare la diagnosi e usare il ripristino della ESP esistente, senza rifare `format`; un esito `UNKNOWN` richiede prima la riconciliazione amministrativa.
+Se la connessione cade, riaprire **Interventi → Recupera interventi**. L’helper rilegge l’inventario. Se riconosce una FAT32 coerente con UUID sul disco e sulla ESP attesi dopo un tentativo di format, lo stato diventa `EFI_REPAIR_REQUIRED`. Usare **Prosegui con nuova ESP**, confrontare gli identificativi e approvare il piano di ripristino. Il journal conserva anche l’esito incerto iniziale. Se l’identità o il filesystem restano incerti, verificare la diagnostica prima di intervenire.
+
+Se entrambe le ESP risultano configurate, aprire **Avvio EFI → Piano pulizia UUID assenti**. Confrontare gli UUID proposti con i dischi effettivamente dismessi. Confermare la lista soltanto dopo aver escluso che un disco registrato sia temporaneamente scollegato.
+
+Se manca la voce del ricambio, **Registra voce UEFI mancante** confronta il file EFI sulla ESP con il loader usato da BootCurrent sul membro alternativo. La registrazione richiede percorso e contenuto coincidenti. Una voce esistente, anche inattiva, richiede diagnosi. Il comando `efibootmgr --create-only` crea la voce fuori da BootOrder. Verificare la nuova voce e usare **Prova avvio da questo disco** per il test BootNext. Se il firmware espone soltanto un fallback e BootCurrent non identifica il loader del disco alternativo, la creazione guidata resta bloccata.
 
 Per i due avvii fisici seguire il [manuale](manuale.md): spegnere prima di scollegare nel laboratorio senza hot swap e risincronizzare il mirror fra una prova e l'altra. Nessun file EFI, UUID o comando `status` sostituisce queste prove.
 

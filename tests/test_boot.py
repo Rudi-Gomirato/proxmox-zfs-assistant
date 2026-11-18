@@ -109,6 +109,51 @@ def pe_image(marker=b"GRUB"):
     return bytes(data)
 
 
+def test_create_only_from_peer_then_verify_and_use_bootnext():
+    from pve_disk_assistant.uefi import preflight
+    snap = rebuilt()
+    snap['tools'].append('efibootmgr')
+    boot_data = snap['boot']
+    target = snap['disks'][-1]
+    peer = snap['disks'][0]['partitions'][1]
+    text = f"BootCurrent: 0003\nBootOrder: 0003,0002\nBoot0003* Proxmox HD(2,GPT,{peer['partuuid']},0x800,0x100)/\\EFI\\proxmox\\grubx64.efi"
+    boot_data['nvram'] = {**boot.parse_boot_entries(text), 'code': 0}
+    for info in boot_data['esps'].values():
+        for f in info['files']:
+            if f.get('efi_valid'):
+                f['sha256'] = 'f' * 64
+    req = {'action': 'register_uefi', 'target': target['by_id'], 'pool_guid': '1000'}
+    plan = core.plan_replacement(snap, req)
+    assert not plan['blocks'], plan['blocks']
+    assert plan['steps'][0]['argv'] == ['efibootmgr', '--create-only', '--disk', target['by_id'],
+        '--part', '2', '--label', 'Proxmox', '--loader', r'\EFI\proxmox\grubx64.efi']
+    plan['before'] = deepcopy(snap)
+    text += f"\nBoot0004* Proxmox HD(2,GPT,{target['partitions'][1]['partuuid']},0x800,0x100)/File(\\EFI\\proxmox\\grubx64.efi)"
+    boot_data['nvram'] = {**boot.parse_boot_entries(text), 'code': 0}
+    node.verify_registry_result(plan, snap)
+    assert plan['registered_entry']['id'] == '0004'
+    assert core.plan_replacement(snap, req)['blocks']
+    assert preflight(snap, req)['entry']['id'] == '0004'
+    boot_data['nvram']['order'].append('0004')
+    with pytest.raises(core.SafetyError, match='firmware'):
+        node.verify_registry_result(plan, snap)
+
+
+def test_unknown_device_path_still_prevents_duplicate_registration():
+    nvram = boot.parse_boot_entries('Boot0001* Proxmox HD(2,GPT,abc,0x800,0x100)/VenHw(unknown)')
+    assert nvram['entries'] == [{'id': '0001', 'active': True, 'partuuid': 'abc', 'file': ''}]
+
+
+def test_cleanup_blocks_unapproved_or_present_uuid():
+    snap = rebuilt()
+    req = {'action': 'clean_boot', 'pool_guid': '1000', 'target': snap['disks'][0]['by_id']}
+    snap['boot']['missing_uuids'] = ['ABCD-1234']
+    assert core.plan_replacement(snap, req)['blocks']
+    snap['boot']['missing_uuids'] = ['DEAD-0000']
+    snap['boot']['registered_uuids'] += ['DEAD-0000', 'DEAD-0001']
+    assert core.plan_replacement(snap, req)['blocks']
+
+
 def test_efi_binary_requires_real_pe_header_and_efi_subsystem():
     assert boot.efi_executable(pe_image())
     assert not boot.efi_executable(b"MZ" + bytes(1024))
@@ -255,7 +300,18 @@ def test_legacy_completed_boot_job_is_reassessed(journal, monkeypatch):
 
 
 def test_boot_commands_wait_for_resilver_and_cursor_prevents_replaying_replace(journal, monkeypatch):
-    plan = root_job(monkeypatch, "QUEUED")
+    live = rebuilt()
+    target = live['disks'][-1]
+    original = boot_inventory(grub=True)
+    monkeypatch.setattr(node, "collect", lambda: original)
+    target['wwn'] = original['disks'][-1]['wwn'] = '5000000000000001'
+    plan = node.prepare({'pool_guid': '1000', 'old_guid': '102', 'target': target['by_id'], 'profile': 'laboratorio'})
+    plan['state'] = 'QUEUED'
+    node.save_record(plan)
+    part = target['partitions'][1]
+    part.update(uuid='', fstype='')
+    live['boot']['esps'][part['path']] = {'probe_code': 2, 'probe': {}, 'signatures': []}
+    monkeypatch.setattr(node, 'bind_esp', lambda p: p.update(expected_esp=deepcopy(part)))
     calls = []
     monkeypatch.setattr(node, "run", lambda args, **k: calls.append(args) or {"code": 0, "out": "", "err": ""})
     node.perform_job(plan["id"])
@@ -264,7 +320,7 @@ def test_boot_commands_wait_for_resilver_and_cursor_prevents_replaying_replace(j
     assert calls[-1][0:2] == ["zpool", "replace"]
     assert all(c[0] != "proxmox-boot-tool" for c in calls)
     assert waiting["next_step"] == len(waiting["steps"])
-    monkeypatch.setattr(node, "collect", rebuilt)
+    monkeypatch.setattr(node, "collect", lambda: live)
     monkeypatch.setattr(node, "spawn_worker", lambda *a: pytest.fail("Must require a new approval"))
     pending = node.get_status(plan["id"])
     assert pending["state"] == "ESP_INITIALIZATION_REQUIRED"

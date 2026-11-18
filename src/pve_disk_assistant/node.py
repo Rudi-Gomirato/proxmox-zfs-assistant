@@ -273,7 +273,7 @@ def initialization_evidence(snapshot, request):
     target, esp = plan["target"], plan.get("expected_esp") or {}
     evidence = {}
     try:
-        matches = []
+        matches, mismatched = [], []
         for path in state_dir().glob("*.json"):
             old = json.loads(path.read_text())
             if request.get("replacement_id") and old.get("id") != request["replacement_id"]:
@@ -281,16 +281,30 @@ def initialization_evidence(snapshot, request):
             if (old.get("action") == "replace" and old.get("host_id") == snapshot.get("host_id")
                     and old.get("pool_guid") == plan["pool_guid"]
                     and old.get("role") in {"BOOT", "MISTO"}
-                    and same_disk_identity(target, old.get("target", {}))
-                    and esp.get("partuuid") and old.get("expected_esp", {}).get("partuuid", "").lower() == esp["partuuid"].lower()
+                    and historical_disk_matches(snapshot, target, old)
+                    and esp.get("partuuid")
                     and any(e.get("phase") == "replace" and e.get("state") == "OK" and e.get("code") == 0 for e in old.get("events", []))):
-                matches.append(old)
+                historical = (old.get("expected_esp") or {}).get("partuuid", "")
+                if historical.lower() == esp["partuuid"].lower():
+                    matches.append(old)
+                else:
+                    mismatched.append(historical)
+        if not matches and mismatched:
+            raise SafetyError("PARTUUID corrente " + esp["partuuid"] + " diverso dallo storico " +
+                              ", ".join(mismatched) + ". Aggiornare la diagnostica e verificare il disco.")
         if len(matches) != 1:
             raise SafetyError("Registro della sostituzione non univoco o identità WWN/seriale/PARTUUID non corrispondente. Nessuna formattazione.")
         old = matches[0]
+        if not (old.get('source') or {}).get('serial') or (plan.get('source') or {}).get('serial') != old['source']['serial']:
+            raise SafetyError("Il disco alternativo configurato non coincide con il membro di riferimento del journal.")
         if old.get("state") in {"QUEUED", "RUNNING", "UNKNOWN"}:
             raise SafetyError("Sostituzione ancora attiva o con esito ignoto: verificare l'intervento prima della ESP.")
         evidence["replacement_id"] = old["id"]
+        evidence["historical_identity"] = journal_identity(old)
+        if not plan.get("old_guid") or plan["old_guid"] == old.get("old_guid"):
+            raise SafetyError("GUID del membro ZFS sostitutivo non verificato.")
+        if old.get("replacement_member_guid") and old["replacement_member_guid"] != plan["old_guid"]:
+            raise SafetyError("GUID ZFS corrente diverso dal membro verificato dopo il resilver.")
         evidence["identity"] = {"by_id": target["by_id"], "serial": target["serial"],
                                 "wwn": normalize_wwn(target["wwn"]), "partuuid": esp["partuuid"]}
         boot_resume_checks(plan, snapshot)
@@ -309,10 +323,54 @@ def initialization_evidence(snapshot, request):
     return evidence
 
 
+def journal_identity(record):
+    disk = record.get("target") or {}
+    return {**{k: disk.get(k) for k in ("serial", "by_id", "wwn", "path")},
+            "partuuid": (record.get("expected_esp") or {}).get("partuuid")}
+
+
+def historical_disk_matches(snapshot, target, record):
+    from .identity import composite_identity_verified
+    old = record.get("target") or {}
+    return same_disk_identity(target, old) or (
+        composite_identity_verified(snapshot["disks"], target) and serial_alias(target) == target["by_id"]
+        and target["serial"] == old.get("serial") and normalize_wwn(target["wwn"]) == normalize_wwn(old.get("wwn")))
+
+
 def build_plan(snapshot, request):
+    if request.get("action") == "continue_esp":
+        old = load_record(request["replacement_id"])
+        if (old.get("host_id") != snapshot.get("host_id") or old.get("action") != "replace"
+                or old.get("pool_guid") != request.get("pool_guid") or old.get("role") not in {"BOOT", "MISTO"}):
+            raise SafetyError("Intervento ZFS non associato a questo nodo e mirror di boot.")
+        pool = next((p for p in snapshot["pools"] if p["guid"] == old["pool_guid"]), None)
+        rows = boot_report(snapshot, pool)["disks"] if pool else []
+        matched = [r for r in rows if r["serial"] == old["target"]["serial"] and r.get("identity_verified")]
+        if len(matched) != 1 or not matched[0].get("esp"):
+            raise SafetyError("Seriale del ricambio o ESP non identificabili sul mirror attuale.")
+        row = matched[0]
+        if row.get('configuration_ready'):
+            raise SafetyError("ESP già configurata. In Avvio EFI verificare gli UUID assenti, la voce firmware e il test BootNext.")
+        part = row["esp"]
+        old_uuid = (old.get("expected_esp") or {}).get("partuuid", "")
+        if not old_uuid or old_uuid.lower() != part.get("partuuid", "").lower():
+            raise SafetyError(f"PARTUUID storico {old_uuid} diverso dal corrente {part.get('partuuid')}. Verificare il ricambio.")
+        action = "repair_boot" if row["checks"]["fat32"]["state"] == "OK" else "initialize_esp"
+        # Keep the resolved request in the preview so approval cannot switch operations.
+        request = {**request, "action": action, "target": row["by_id"]}
     if request.get("action") == "initialize_esp":
         snapshot = {**snapshot, "esp_initialization": initialization_evidence(snapshot, request)}
-    return plan_replacement(snapshot, request)
+    plan = plan_replacement(snapshot, request)
+    if request.get("action") == "repair_boot" and request.get("replacement_id"):
+        old = load_record(request["replacement_id"])
+        if (old.get("action") != "replace" or old.get("host_id") != plan["host_id"]
+                or old.get("pool_guid") != plan["pool_guid"] or not historical_disk_matches(snapshot, plan["target"], old)
+                or not (old.get("expected_esp") or {}).get("partuuid")
+                or journal_identity(old)["partuuid"].lower() != (plan.get("expected_esp") or {}).get("partuuid", "").lower()):
+            plan["blocks"].append("Identità corrente della ESP diversa dall'intervento ZFS selezionato.")
+        else:
+            plan.update(replacement_id=old["id"], historical_identity=journal_identity(old))
+    return plan
 
 
 def same_plan(before, after):
@@ -367,6 +425,8 @@ def submit(request):
             if request.get("format_partuuid_confirmation") != plan["expected_esp"]["partuuid"]:
                 raise SafetyError("Conferma esplicita della formattazione e PARTUUID mancanti.")
             plan["format_approved"] = {"partuuid": request["format_partuuid_confirmation"], "at": utcnow()}
+        if plan.get("action") == "clean_boot" and request.get("cleanup_confirmation") != plan["missing_uuids"]:
+            raise SafetyError("La lista degli UUID da rimuovere richiede conferma esplicita.")
         # A queued worker may not yet own the operation lock.
         for path in state_dir().glob("*.json"):
             entry = json.loads(path.read_text())
@@ -471,9 +531,14 @@ def verify_boot_write(plan, step):
         checked = build_plan(collect(), plan["request"])
         if not same_plan(plan, checked):
             raise SafetyError("Verifica immediata ESP fallita: formattazione annullata. " + "; ".join(checked["blocks"]))
-    elif plan.get("action") == "initialize_esp":
+    elif plan.get("action") in {"initialize_esp", "repair_boot"}:
         fresh = collect()
-        boot_resume_checks(plan, fresh)
+        if plan["action"] == "repair_boot":
+            checked = build_plan(fresh, plan["request"])
+            if not same_plan(plan, checked):
+                raise SafetyError("Identità o diagnostica cambiata prima di init.")
+        else:
+            boot_resume_checks(plan, fresh)
         pool = next(p for p in fresh["pools"] if p["guid"] == plan["pool_guid"])
         row = next(r for r in boot_report(fresh, pool)["disks"] if r["by_id"] == plan["target"]["by_id"])
         if any(row["checks"][k]["state"] != "OK" for k in ("fat32", "filesystem", "identity")):
@@ -486,6 +551,8 @@ def verify_boot_write(plan, step):
 
 def boot_resume_checks(plan, snapshot):
     verify_target(plan)
+    if snapshot.get('host_id') != plan.get('host_id'):
+        raise SafetyError("Identità del nodo diversa da quella approvata.")
     pool = next((p for p in snapshot["pools"] if p["guid"] == plan["pool_guid"]), None)
     if not pool or not zfs_ready(plan, snapshot, pool):
         raise SafetyError("Il resilver non è concluso o il mirror non è verificato.")
@@ -499,10 +566,15 @@ def boot_resume_checks(plan, snapshot):
 def zfs_ready(plan, snapshot, pool):
     target = next((d for d in snapshot["disks"] if plan["target"]["by_id"] in [d.get("by_id"), *d.get('aliases', [])]
                    and d.get("serial") == plan["target"]["serial"]), None)
+    if not target and plan.get('action') == 'replace':
+        target = next((d for d in snapshot['disks'] if historical_disk_matches(snapshot, d, plan)), None)
     members = leaves(pool)
     return (snapshot["complete"] and not snapshot.get("issues") and not pool.get("warnings") and target is not None
             and (not plan["target"].get("wwn") or normalize_wwn(target.get("wwn")) == normalize_wwn(plan["target"]["wwn"]))
-            and any(disk_for_member(snapshot, m) == target for m in members)
+            and any(disk_for_member(snapshot, m) == target and
+                    (not plan.get("replacement_member_guid") or m.get("guid") == plan["replacement_member_guid"]) and
+                    (plan.get("action") not in {"repair_boot", "initialize_esp", "register_uefi", "clean_boot"}
+                     or m.get("guid") == plan.get("old_guid")) for m in members)
             and pool["state"] == "ONLINE" and pool["errors"] == "No known data errors"
             and all(m["state"] in {"ONLINE", "HEALTHY"} and len(m["errors"]) == 3 and not any(m["errors"]) for m in members)
             and "in progress" not in pool["scan"])
@@ -532,10 +604,18 @@ def perform_job(identifier):
                     for index in range(plan.get("next_step", 0), len(plan["steps"])):
                         step = plan["steps"][index]
                         verify_target(plan)
-                        if step['phase'] == 'clean_boot':
+                        if step['phase'] in {'clean_boot', 'register_uefi'}:
+                            bind_esp(plan)
                             checked = plan_replacement(collect(), plan['request'])
                             if checked['blocks'] or checked['fingerprint'] != plan['fingerprint']:
-                                raise SafetyError('Registro o mirror cambiati: pulizia UUID annullata.')
+                                raise SafetyError('Registro EFI, firmware o mirror cambiati. Generare una nuova anteprima.')
+                        if step['phase'] == 'boot_refresh' and plan.get('action') in {'repair_boot', 'initialize_esp'}:
+                            bind_esp(plan)
+                            checked = plan_replacement(collect(), {**plan['request'], 'action': 'repair_boot'})
+                            if (checked['blocks'] or checked['old_guid'] != plan['old_guid']
+                                    or checked['bootloader'] != plan['bootloader']
+                                    or (checked.get('expected_esp') or {}).get('uuid') != plan.get('formatted_uuid')):
+                                raise SafetyError('Identità ZFS, UUID FAT32 o bootloader cambiati prima di refresh.')
                         if step["phase"] in {"replace", "offline"}:
                             if plan.get("source"):
                                 verify_copied_layout(plan)
@@ -571,6 +651,8 @@ def perform_job(identifier):
                             plan["verification_error"] = "proxmox-boot-tool status non riuscito: verificare diagnostica EFI e UUID assenti."
                         elif result["code"]:
                             raise SafetyError("Comando fallito. Non ripetere automaticamente: " + step["command"])
+                        if step["phase"] in {"register_uefi", "clean_boot"}:
+                            verify_registry_result(plan, collect())
                         plan["next_step"] = index + 1
                         if step["phase"] == "replace" and plan["role"] in {"BOOT", "MISTO"}:
                             plan["state"] = "WAITING_RESILVER"
@@ -602,6 +684,23 @@ def perform_job(identifier):
             time.sleep(0.25)
 
 
+def verify_registry_result(plan, snapshot):
+    before, after = plan['before']['boot'], snapshot['boot']
+    if plan['action'] == 'clean_boot':
+        retained = set(before['registered_uuids']) - set(plan['missing_uuids'])
+        if not after.get('registration_readable') or set(after['registered_uuids']) != retained or after.get('missing_uuids'):
+            raise SafetyError('Registro dopo clean diverso dalla lista approvata. Consultare il journal.')
+        plan['retained_uuids'] = sorted(retained)
+        return
+    old, new = before['nvram'], after['nvram']
+    entries = [e for e in new['entries'] if e['partuuid'] == plan['expected_esp']['partuuid'].lower()]
+    if (new.get('code') != 0 or new.get('ambiguous') or len(entries) != 1 or not entries[0]['active']
+            or entries[0]['file'] != plan['firmware_loader']
+            or any(old.get(k) != new.get(k) for k in ('order', 'next', 'current'))):
+        raise SafetyError('Voce UEFI o variabili firmware diverse dal risultato previsto. Rileggere la diagnostica.')
+    plan['registered_entry'] = entries[0]
+
+
 def get_status(identifier):
     record_path(identifier)
     if load_record(identifier).get('action') == 'uefi_test':
@@ -614,6 +713,29 @@ def get_status(identifier):
 def _get_status(identifier):
     plan = load_record(identifier)
     is_boot = plan.get("role") in {"BOOT", "MISTO"} and plan.get("action") != "offline"
+    if plan.get("action") == "initialize_esp" and plan["state"] in {"UNKNOWN", "FAILED"}:
+        if any(e.get("command") == plan["steps"][0]["command"] for e in plan.get("events", [])):
+            fresh = collect()
+            try:
+                checked = plan_replacement(fresh, {**plan["request"], "action": "repair_boot"})
+            except SafetyError as exc:
+                plan.update(last_checked=fresh.get('collected_at'), reconciliation_error=str(exc))
+                save_record(plan)
+                return plan
+            if (not checked["blocks"] and fresh["host_id"] == plan["host_id"]
+                    and checked["old_guid"] == plan["old_guid"] and checked["target"]["serial"] == plan["target"]["serial"]
+                    and same_disk_identity(checked["target"], plan["target"])
+                    and checked["expected_esp"]["partuuid"].lower() == plan["expected_esp"]["partuuid"].lower()
+                    and checked["expected_esp"].get("uuid") and checked.get("source") != checked["target"]
+                    and zfs_ready(checked, fresh, next(p for p in fresh['pools'] if p['guid'] == plan['pool_guid']))):
+                plan.update(state="EFI_REPAIR_REQUIRED", previous_state=plan["state"], last_checked=fresh["collected_at"],
+                            observed_esp=checked["expected_esp"], result_message="FAT32 verificata dopo l'interruzione. Preparare un piano di ripristino senza format.")
+                plan.pop('reconciliation_error', None)
+            else:
+                plan.update(last_checked=fresh.get('collected_at'), reconciliation_error="; ".join(checked['blocks']) or
+                            "Identità di disco, membro ZFS e FAT32 non confermata rispetto al piano interrotto.")
+            save_record(plan)
+        return plan
     if plan.get("action") == "replace" and plan["state"] in {"FAILED", "UNKNOWN"}:
         # Read-only reconciliation: no command replay and no new write approval.
         plan["system_observation"] = observe_replacement(plan, collect())
@@ -634,15 +756,40 @@ def _get_status(identifier):
         plan["resilver_state"] = "OK" if ready else plan["zfs_state"]
         if is_boot and pool:
             plan["boot_validation"] = boot_report(snapshot, pool)
+            previous_nvram = plan.get('before', {}).get('boot', {}).get('nvram', {})
+            nvram = snapshot['boot'].get('nvram', {})
+            if previous_nvram.get('code') == 0 and nvram.get('code') == 0:
+                plan['firmware_observation'] = {'order_before': previous_nvram.get('order'), 'order_now': nvram.get('order'),
+                                                'current': nvram.get('current'), 'next': nvram.get('next')}
+            rows = [r for r in plan["boot_validation"]["disks"] if r["serial"] == plan['target']['serial'] and r['identity_verified']]
+            if len(rows) == 1:
+                row = rows[0]
+                plan['current_identity'] = {k: row[k] for k in ('serial', 'by_id', 'member_guid', 'mode', 'nvram_entry_ids')}
+                plan['current_identity'].update(esp=row['esp'], checked_at=snapshot['collected_at'],
+                                                boot_current=snapshot['boot'].get('nvram', {}).get('current'))
+            else:
+                plan.pop('current_identity', None)
         if ready and plan["state"] in {"WAITING_RESILVER", "ESP_INITIALIZATION_REQUIRED"}:
             with locked():
                 persisted = load_record(identifier)
                 if persisted["state"] != plan["state"]:
                     return persisted
                 try:
-                    boot_resume_checks(plan, snapshot)
-                    plan["state"] = "ESP_INITIALIZATION_REQUIRED"
-                    plan["result_message"] = "Resilver concluso. In Avvio EFI selezionare il nuovo disco e Inizializza nuova ESP dopo sostituzione disco. È richiesta una nuova approvazione prima di formattare."
+                    if not plan.get('current_identity'):
+                        raise SafetyError('Identità corrente del membro non confermata.')
+                    current = plan_replacement(snapshot, {'action': 'initialize_esp', 'target': row['by_id'], 'pool_guid': pool['guid']})
+                    if (not historical_disk_matches(snapshot, current['target'], plan)
+                            or not (row.get('esp') or {}).get('partuuid')
+                            or journal_identity(plan)['partuuid'] != row['esp']['partuuid']):
+                        raise SafetyError('Identità storica o PARTUUID diversi dalla diagnostica corrente.')
+                    boot_resume_checks(current, snapshot)
+                    plan.setdefault("replacement_member_guid", current["old_guid"])
+                    if row["checks"]["fat32"]["state"] == "OK":
+                        plan["state"] = "BOOT_REVIEW_REQUIRED"
+                        plan["result_message"] = "Resilver concluso. FAT32 presente sul ricambio. Verificare la configurazione EFI."
+                    else:
+                        plan["state"] = "ESP_INITIALIZATION_REQUIRED"
+                        plan["result_message"] = "Resilver concluso. Proseguire dalla fase EFI con una nuova anteprima e approvazione."
                 except Exception as exc:
                     plan["state"], plan["error"] = "BOOT_REVIEW_REQUIRED", str(exc)
                 save_record(plan)

@@ -70,6 +70,7 @@ def test_survivor_repair_has_no_format_or_gpt_dependency():
 def test_uuid_cleanup_requires_healthy_mirror_and_both_esps():
     snapshot = inventory()
     snapshot['boot']['missing_uuids'] = ['DEAD-0000']
+    snapshot['boot']['registered_uuids'].append('DEAD-0000')
     req = {'action': 'clean_boot', 'pool_guid': '1000', 'target': snapshot['disks'][0]['by_id']}
     plan = core.plan_replacement(snapshot, req)
     assert not plan['blocks'], plan['blocks']

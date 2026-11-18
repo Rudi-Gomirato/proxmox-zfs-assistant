@@ -12,6 +12,7 @@ STATE_LABELS = {
     "MONITORING": "Verifica in corso", "WAITING_RESILVER": "Ricostruzione ZFS in corso",
     "ESP_INITIALIZATION_REQUIRED": "ZFS pronto · configura EFI", "ESP_INITIALIZATION_LINKED": "Prosegui nell'intervento EFI collegato",
     "BOOT_REVIEW_REQUIRED": "Avvio EFI da verificare", "BOOT_TEST_PENDING": "Prova fisica di avvio richiesta",
+    "EFI_REPAIR_REQUIRED": "FAT32 rilevata dopo interruzione · riprendi configurazione EFI",
     "BOOT_TEST_REQUIRED": "Prova fisica di avvio richiesta", "ZFS_REVIEW_REQUIRED": "Stato ZFS da verificare",
     "COMPLETED": "Verifiche completate", "FAILED": "Comando non riuscito", "UNKNOWN": "Esito da riconciliare",
     "BLOCKED": "Controlli non superati", "FAILED_TO_START": "Esecuzione non avviata",
@@ -25,7 +26,7 @@ def state_label(state):
 
 def should_refresh(job):
     return (job.get("state") in REVIEW_STATES | ACTIVE_STATES | UEFI_PENDING
-            or job.get("action") == "replace" and job.get("state") in {"FAILED", "UNKNOWN"}
+            or job.get("action") in {"replace", "initialize_esp"} and job.get("state") in {"FAILED", "UNKNOWN"}
             or job.get("role") in {"BOOT", "MISTO"} and job.get("state") == "COMPLETED")
 
 
@@ -37,6 +38,8 @@ def next_step(job):
                 'Test UEFI distinto dall’autonomia fisica: consulta lo storico in Avvio EFI.')
     if state in {"FAILED", "UNKNOWN", "BLOCKED", "FAILED_TO_START"}:
         return "Aggiorna lo stato reale e consulta il comando non riuscito. Non ripetere GPT, replace o format."
+    if state == "EFI_REPAIR_REQUIRED":
+        return "Prosegui con la ESP rilevata. Rivedi e approva il ripristino della FAT32 esistente."
     if state == "ESP_INITIALIZATION_REQUIRED":
         return "Continua con la nuova ESP: il nodo preparerà un piano separato da approvare."
     if state == "ESP_INITIALIZATION_LINKED":

@@ -260,3 +260,52 @@ def test_missing_old_uuid_stays_separate_from_new_esp_plan(replacement):
     assert not plan["blocks"]
     assert plan["missing_uuids"] == ["DEAD-0000"]
     assert not any(s["argv"][:2] == ["proxmox-boot-tool", "clean"] for s in plan["steps"])
+
+
+@pytest.mark.parametrize("state", ["ESP_INITIALIZATION_REQUIRED", "BOOT_REVIEW_REQUIRED"])
+def test_continue_from_historical_wwn_after_reopening(replacement, state):
+    parent, snapshot, target, part = replacement
+    peer = snapshot["disks"][0]
+    peer["wwn"] = target["wwn"]
+    target["aliases"] = [target["by_id"]]
+    target["model"] = peer["model"]
+    parent["target"] = {**parent["target"], "by_id": "/dev/disk/by-id/wwn-obsolete", "aliases": []}
+    parent["state"] = state
+    node.save_record(parent)
+    req = {"action": "continue_esp", "pool_guid": "1000", "replacement_id": parent["id"]}
+    plan = node.prepare(req)
+    assert not plan["blocks"], plan["blocks"]
+    assert plan["action"] == "initialize_esp"
+    assert plan["target"]["by_id"] == target["by_id"]
+    assert plan["expected_esp"]["partuuid"] == part["partuuid"]
+    assert node.load_record(parent["id"]) == parent
+    assert all(s['argv'][0] == 'proxmox-boot-tool' for s in plan['steps'])
+
+
+def test_reconcile_interrupted_format_then_prepare_only_repair(replacement):
+    parent, snapshot, target, part = replacement
+    plan = node.prepare(request())
+    plan.update(state="UNKNOWN", events=[{"state": "STARTED", "command": plan["steps"][0]["command"]}])
+    node.save_record(plan)
+    healthy = rebuilt()
+    part.update(healthy["disks"][-1]["partitions"][1])
+    snapshot["boot"] = healthy["boot"]
+    snapshot["boot"]["registered_uuids"].remove(part["uuid"])
+    reconciled = node.get_status(plan["id"])
+    assert reconciled["state"] == "EFI_REPAIR_REQUIRED"
+    assert reconciled["events"] == plan["events"]
+    new_plan = node.prepare({"action": "continue_esp", "pool_guid": parent["pool_guid"], "replacement_id": parent["id"]})
+    assert new_plan["action"] == "repair_boot" and not new_plan["blocks"]
+    assert new_plan["replacement_id"] == parent["id"]
+    assert [s["argv"][1] for s in new_plan["steps"]] == ["init", "refresh", "status"]
+    node.perform_job(plan["id"])
+    assert node.load_record(plan["id"]) == reconciled
+
+
+def test_no_invented_esp_alias_and_changed_partition_message(replacement):
+    parent, _, _, part = replacement
+    part['aliases'] = []
+    assert any('Alias persistente' in b for b in node.prepare(request())['blocks'])
+    part['partuuid'] = 'different-live-partuuid'
+    with pytest.raises(core.SafetyError, match='PARTUUID storico.*diverso dal corrente'):
+        node.prepare({'action': 'continue_esp', 'pool_guid': '1000', 'replacement_id': parent['id']})

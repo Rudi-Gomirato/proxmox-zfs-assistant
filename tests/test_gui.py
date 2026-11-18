@@ -65,6 +65,38 @@ def test_sidebar_and_collapsible_details_preserve_selected_workflow(app, tmp_pat
     window.close()
 
 
+@pytest.mark.parametrize("section", ["efi", "jobs"])
+def test_efi_preview_stays_in_originating_section(app, tmp_path, monkeypatch, section):
+    from PySide6.QtWidgets import QDialog, QTextBrowser
+    from pve_disk_assistant.core import plan_replacement
+    window = Window(tmp_path, demo=False)
+    snap = snapshot(boot_fault=True)
+    window.backend = DemoBackend(boot_fault=True)
+    window.render_snapshot(snap)
+    disk = snap['disks'][0]
+    plan = plan_replacement(snap, {'action': 'initialize_esp', 'target': disk['by_id'], 'pool_guid': '1000'})
+    requests = []
+    monkeypatch.setattr(window.backend, 'rpc', lambda req: requests.append(req) or plan)
+    monkeypatch.setattr(window, 'asynchronous', lambda fn, cb, label: cb(fn()))
+    if section == 'efi':
+        window.tabs.setCurrentIndex(5)
+        window.boot_table.setCurrentCell(0, 0)
+        window.initialize_esp_button.click()
+        assert requests[0]['request']['target'] == disk['by_id']
+    else:
+        window.tabs.setCurrentIndex(3)
+        window.render_jobs([{'id': 'example', 'action': 'replace', 'pool': 'rpool', 'pool_guid': '1000',
+                             'role': 'BOOT', 'state': 'BOOT_REVIEW_REQUIRED'}])
+        window.continue_esp_button.click()
+        assert requests[0]['request'] == {'action': 'continue_esp', 'pool_guid': '1000', 'replacement_id': 'example'}
+    dialog = window.findChild(QDialog)
+    assert dialog and 'PARTUUID' in dialog.findChild(QTextBrowser).toPlainText()
+    assert window.tabs.currentIndex() == (5 if section == 'efi' else 3)
+    assert window.plan is None
+    dialog.reject()
+    window.close()
+
+
 def test_gui_renders_both_topologies_and_preserves_approval_boundary(app, tmp_path):
     window = Window(tmp_path, demo=False)
     window.backend = DemoBackend()

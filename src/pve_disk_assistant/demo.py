@@ -109,6 +109,7 @@ def add_boot_observations(snapshot, mode="systemd"):
             esps[part["path"]] = {"probe_code": 0, "probe": {"TYPE": "vfat", "VERSION": "FAT32", "UUID": fs_uuid},
                 "signatures": [{"type": "vfat"}], "fsck_code": 0, "fsck_output": "Dati sintetici", "inspection_ok": True, "files": files}
     snapshot["boot"] = {"firmware_mode": "UEFI", "architecture": "x86_64", "secure_boot": False,
+        "command_syntax": dict.fromkeys(("format", "init", "grub", "refresh", "status"), True),
         "registered_uuids": registered, "registration_readable": True, "status": "\n".join(lines), "code": 0,
         "nvram": {"code": 0, "current": "0001", "order": ["0001"], "entries": []}, "esps": esps, "grub_config_present": True}
 

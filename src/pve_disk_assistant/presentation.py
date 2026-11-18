@@ -54,6 +54,16 @@ def plan_html(plan, hostname="?"):
     if plan.get("source"):
         body += "<p>Riferimento: " + e(plan["source"]["serial"]) + "</p>"
     body += disk_html(plan['target'], plan.get('before'))
+    if plan.get('planned_esp_path'):
+        part = plan.get('expected_esp') or {}
+        body += '<h3>ESP selezionata</h3><p>' + e(part.get('path')) + ' · ' + e(plan['planned_esp_path'])
+        body += '<br>PARTUUID ' + e(part.get('partuuid')) + ' · GUID ZFS ' + e(plan.get('old_guid'))
+        body += '<br>Filesystem rilevato ' + e(part.get('fstype') or 'nessuna firma rilevata')
+        body += ' · Bootloader ' + e(plan.get('bootloader')) + '</p>'
+        if plan.get('action') == 'initialize_esp':
+            body += '<p><b>Operazione distruttiva sulla ESP selezionata. Filesystem previsto FAT32.</b></p>'
+        if plan.get('replacement_id'):
+            body += '<p>Intervento ZFS collegato ' + e(plan['replacement_id']) + '</p>'
     if plan["blocks"]:
         body += "<h3 style='color:#ffacb5'>Controlli non superati · nessuna esecuzione</h3><ul>" + "".join("<li>" + e(b) + "</li>" for b in plan["blocks"]) + "</ul>"
     else:
@@ -80,7 +90,24 @@ def job_html(job):
     body = f"<h2>{e(job.get('pool', 'Intervento'))} · {e(state_label(job['state']))}</h2><p>ID {e(job['id'])} · {e(job['state'])}</p>"
     body += "<p><b>Prossimo passo:</b> " + e(next_step(job)) + "</p>"
     if job.get('target'):
+        body += '<h3>Identità registrata alla creazione</h3>'
         body += disk_html(job['target'], job.get('before'))
+        body += '<p>PARTUUID storico ' + e((job.get('expected_esp') or {}).get('partuuid') or 'non registrato') + '</p>'
+    if job.get('current_identity'):
+        current = job['current_identity']
+        part = current.get('esp') or {}
+        body += '<h3>Ultima identità osservata sul nodo</h3><p>' + e(current['checked_at']) + ' · ' + e(current['serial'])
+        body += '<br>' + e(current['by_id']) + ' · GUID ZFS ' + e(current['member_guid'])
+        body += '<br>' + e(part.get('path')) + ' · PARTUUID ' + e(part.get('partuuid')) + ' · UUID ' + e(part.get('uuid'))
+        body += '<br>' + e(current['mode']) + ' · Voci UEFI ' + e(', '.join(current['nvram_entry_ids']) or 'nessuna')
+        body += ' · BootCurrent ' + e(current['boot_current']) + '</p>'
+    for key, label in [('replacement_id', 'Intervento ZFS'), ('initialization_job', 'Intervento EFI')]:
+        if job.get(key):
+            body += '<p>' + label + ' ' + e(job[key]) + '</p>'
+    fw = job.get('firmware_observation', {})
+    if fw and fw['order_before'] != fw['order_now']:
+        body += '<p>BootOrder cambiato dopo l’anteprima. Prima ' + e(', '.join(fw['order_before'] or []))
+        body += ' · Ultima lettura ' + e(', '.join(fw['order_now'] or [])) + '</p>'
     if job.get('action') == 'uefi_test':
         body += '<p>Test del percorso UEFI, non prova di autonomia fisica.</p>'
         for label, value in [('Voce richiesta', job.get('entry')), ('Identità vincolata', job.get('binding')),
@@ -93,7 +120,7 @@ def job_html(job):
     observation = job.get("system_observation")
     if observation:
         body += "<h3>Stato attuale del nodo: " + e(observation["state"]) + "</h3><p>" + e(observation["detail"]) + "<br>Rilevato: " + e(observation.get("checked_at")) + "</p>"
-    for key in ("error", "verification_error", "result_message"):
+    for key in ("error", "verification_error", "reconciliation_error", "result_message"):
         if job.get(key):
             body += "<p>" + e(job[key]) + "</p>"
     if job.get("zfs_state"):

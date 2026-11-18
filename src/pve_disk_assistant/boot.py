@@ -16,7 +16,7 @@ import tempfile
 import shlex
 from pathlib import Path
 
-from .core import ESP, GOOD, SafetyError, disk_for_member, leaves, partition_for, digest
+from .core import ESP, GOOD, SafetyError, disk_for_member, leaves, partition_for, digest, command_text
 
 
 def parse_boot_entries(text):
@@ -34,9 +34,11 @@ def parse_boot_entries(text):
         ids.append(match[1].upper())
         part = re.search(r"HD\(\d+,GPT,([^,]+),", match[3], re.I)
         file = re.search(r"File\(([^)]+)\)", match[3], re.I)
-        if part and file:
+        if not file:
+            file = re.search(r"HD\([^)]+\)/([\\/]EFI[\\/][^\t]*?\.efi)(?:\s|$)", match[3], re.I)
+        if part:
             entries.append({"id": match[1].upper(), "active": bool(match[2]),
-                            "partuuid": part[1].lower(), "file": normalize_path(file[1])})
+                            "partuuid": part[1].lower(), "file": normalize_path(file[1]) if file else ""})
     invalid = (len(ids) != len(set(ids)) or len(order) != len(set(order)) or
                any(not re.fullmatch(r'[0-9A-F]{4}', v) for v in [current, *order, *([next_boot] if next_boot else [])]))
     return {"current": current, "order": order, "next": next_boot, "entries": entries, "ambiguous": invalid}
@@ -131,6 +133,14 @@ def inspect_esp_namespace(path, run):
 
 def collect_boot(snapshot, run, helper):
     previous = snapshot.get("boot", {})
+    # The no-argument synopsis advertises the optional GRUB mode. The longer
+    # help text in supported packages omits it even though init accepts it.
+    usage = run(["proxmox-boot-tool"])
+    usage_text = usage["out"] + "\n" + usage["err"]
+    syntax = {name: bool(re.search(r"\bproxmox-boot-tool\s+" + name + suffix, usage_text, re.I))
+              for name, suffix in (("format", r"\s+<[^>]+>"), ("init", r"\s+<[^>]+>"),
+                                   ("refresh", r"\b"), ("status", r"\b"))}
+    syntax["grub"] = bool(re.search(r"\binit\s+<[^>]+>[^\n]*\bgrub\b", usage_text, re.I))
     registration_path = Path("/etc/kernel/proxmox-boot-uuids")
     try:
         registrations = [line.split("#", 1)[0].strip().upper() for line in registration_path.read_text().splitlines()]
@@ -147,7 +157,7 @@ def collect_boot(snapshot, run, helper):
         except OSError:
             pass
     nvram = run(["efibootmgr", "-v"]) if firmware == "UEFI" else {"code": 0, "out": "", "err": "BIOS Legacy"}
-    boot = {**previous, "firmware_mode": firmware, "architecture": getattr(os.uname(), "machine", "unknown").lower(),
+    boot = {**previous, "command_syntax": syntax, "firmware_mode": firmware, "architecture": getattr(os.uname(), "machine", "unknown").lower(),
             "secure_boot": secure_boot, "registered_uuids": registrations, "registration_readable": readable,
             "nvram": {**parse_boot_entries(nvram["out"]), "code": nvram["code"], "error": nvram["err"]},
             'missing_uuids': [u for u in registrations if re.fullmatch(r'[0-9A-F]{4}-[0-9A-F]{4}', u) and not Path('/dev/disk/by-uuid', u).exists()],
@@ -272,11 +282,12 @@ def boot_report(snapshot, pool):
         check('configuration', configuration['state'], configuration['detail'])
         nvram = boot.get("nvram", {})
         matching = [e for e in nvram.get("entries", []) if str(e.get("partuuid", "")).casefold() == part.get("partuuid", "").casefold()
-                    and e.get("active") and e.get("file") in valid and (e["id"] in nvram.get("order", []) or e["id"] == nvram.get("current"))]
+                    and e.get("active") and e.get("file") in valid]
         path_ok = bool(fallback or matching)
         check("uefi_path", "OK" if path_ok else "ERROR" if info.get("inspection_ok") else "UNKNOWN",
               "Fallback EFI valido sul disco." if fallback else "Voce UEFI attiva coerente con PARTUUID e file." if matching else "Nessun percorso UEFI utilizzabile confermato.")
         record["fallback_present"] = bool(fallback)
+        record["entries_in_boot_order"] = [e["id"] for e in matching if e["id"] in nvram.get("order", [])]
         record["nvram_entry_ids"] = [e["id"] for e in matching]
         if boot.get("secure_boot") is True and mode == "systemd":
             check("secure_boot", "UNKNOWN", "systemd-boot con Secure Boot non è certificabile da questa procedura.")
@@ -292,6 +303,46 @@ def boot_report(snapshot, pool):
             "nvram_readable": boot.get("nvram", {}).get("code") == 0,
             'missing_uuids': boot.get('missing_uuids', []),
             "warnings": [line.strip() for line in boot.get("status", "").splitlines() if "WARN:" in line or "ERROR:" in line]}
+
+
+def registration_plan(snapshot, plan):
+    """Use the loader actually used on the peer, validated on the selected ESP."""
+    boot = snapshot['boot']
+    nvram = boot.get('nvram', {})
+    target = plan['target']
+    rows = plan['boot_before']['disks']
+    row = next(r for r in rows if r['by_id'] == target['by_id'])
+    peer = next((r for r in rows if r['by_id'] != target['by_id']), {})
+    esp = row.get('esp') or {}
+    peer_esp = peer.get('esp') or {}
+    blocks = plan['blocks']
+    plan.update(action='register_uefi', steps=[])
+    if ('efibootmgr' not in snapshot['tools'] or nvram.get('code') != 0 or nvram.get('ambiguous')
+            or not nvram.get('order') or not nvram.get('current') or not peer.get('configuration_ready')):
+        blocks.append('Firmware, BootOrder o ESP alternativa non verificati.')
+    if any(c['state'] != 'OK' for k, c in row['checks'].items() if k != 'uefi_path'):
+        blocks.append('Verificare prima filesystem, registrazione Proxmox, bootloader e kernel della ESP.')
+    if any(e['partuuid'] == esp.get('partuuid', '').lower() for e in nvram.get('entries', [])):
+        blocks.append('Una voce firmware fa già riferimento alla ESP, anche se inattiva o incompleta. Verificarla prima di procedere.')
+    sources = [e for e in nvram.get('entries', []) if e['id'] == nvram.get('current') and
+               e['id'] in peer.get('nvram_entry_ids', [])]
+    loader = sources[0]['file'] if len(sources) == 1 else ''
+    def observed(part):
+        return next((f for f in boot.get('esps', {}).get(part.get('path'), {}).get('files', [])
+                     if normalize_path(f['path']) == loader and f.get('efi_valid')), {})
+    file, reference = observed(esp), observed(peer_esp)
+    compatible = {'grub': {'grub', 'shim'}, 'systemd': {'systemd'}}.get(row['mode'], set())
+    if (file.get('loader_kind') not in compatible or not reference or not file.get('sha256') or file['sha256'] != reference.get('sha256')
+            or not re.fullmatch(r'efi/(?:[a-z0-9_.-]+/)+[a-z0-9_.-]+\.efi', loader)
+            or '..' in loader.split('/')):
+        blocks.append('Loader avviato sul disco alternativo non identificato o file EFI differente sul disco selezionato.')
+    if not blocks:
+        argv = ['efibootmgr', '--create-only', '--disk', target['by_id'], '--part', str(esp['number']),
+                '--label', 'Proxmox', '--loader', '\\' + file['path'].replace('/', '\\')]
+        plan['steps'] = [{'phase': 'register_uefi', 'argv': argv, 'command': command_text(argv),
+                          'explanation': 'Registra il loader verificato e rilegge le variabili firmware. BootOrder e BootNext devono restare invariati.'}]
+    plan['firmware_loader'] = loader
+    return plan
 
 
 def boot_pairs(text):

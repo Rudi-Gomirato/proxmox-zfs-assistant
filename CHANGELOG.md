@@ -1,5 +1,13 @@
 # Modifiche
 
+## 0.5.1 — 18 novembre 2026
+
+- Anteprima e approvazione EFI dalle sezioni Avvio EFI e Interventi, anche dopo la chiusura dell’app. Il nodo identifica il membro attuale del mirror e controlla il PARTUUID registrato prima del format.
+- Se una scrittura è rimasta incerta, il recupero interroga il nodo. Una FAT32 coerente sul ricambio identificato consente una nuova approvazione per il ripristino. Il journal conserva comando ed esito originali.
+- Pulizia con confronto tra UUID approvati e registro dopo l’esecuzione. Registrazione UEFI con il loader verificato del disco alternativo, controllo duplicati e rilettura di BootOrder, BootNext e BootCurrent.
+- Storico con osservazione corrente del disco accanto ai dati iniziali, collegamenti agli interventi EFI e informazioni firmware incluse nei rapporti anonimizzati.
+- Validazione automatica con inventari sintetici e pacchetto Windows. Il collaudo finale di avvio sul firmware del laboratorio richiede una prova fisica.
+
 ## 0.5.0 — 17 novembre 2026
 
 - Distribuzione Windows anche come installer EXE per utente, con tutte le librerie e licenze, collegamenti e disinstallazione senza cancellare i dati locali dell'app. Build riproducibile dallo script Inno Setup incluso; SHA256 pubblicati con gli asset.
