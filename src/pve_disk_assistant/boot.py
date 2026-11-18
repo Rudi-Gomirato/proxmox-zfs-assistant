@@ -41,7 +41,8 @@ def parse_boot_entries(text):
                             "partuuid": part[1].lower(), "file": normalize_path(file[1]) if file else ""})
     invalid = (len(ids) != len(set(ids)) or len(order) != len(set(order)) or
                any(not re.fullmatch(r'[0-9A-F]{4}', v) for v in [current, *order, *([next_boot] if next_boot else [])]))
-    return {"current": current, "order": order, "next": next_boot, "entries": entries, "ambiguous": invalid}
+    return {"current": current, "order": order, "next": next_boot, "entries": entries, "ambiguous": invalid,
+            "entry_lines": [line for line in text.splitlines() if re.match(r"^Boot[0-9a-fA-F]{4}[* ]", line)]}
 
 
 def normalize_path(value):

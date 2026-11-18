@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import __version__
 from .boot import boot_report, collect_boot, inspect_esp_namespace
-from .esp import blank_esp, EspCheckError
+from .esp import blank_esp, EspCheckError, EspInUse, verify_unused
 from .identity import normalize_wwn, same_disk_identity, serial_alias, annotate_identities
 from .workflow import REVIEW_STATES, observe_replacement
 from .core import (SafetyError, classify, data_groups, digest, disk_for, leaves,
@@ -314,12 +314,35 @@ def initialization_evidence(snapshot, request):
                 or pool.get("scan") == old_pool.get("scan")):
             raise SafetyError("Manca l'esito di resilver (o successivo scrub) concluso senza errori dopo la sostituzione.")
         if target.get("holders") or esp.get("mounts"):
-            raise SafetyError("ESP in uso o dispositivi dipendenti presenti.")
-        evidence["blank"] = blank_esp(plan["expected_esp"]["path"], esp.get("size", 0), run)
+            raise EspInUse("ESP in uso o dispositivi dipendenti presenti.")
+        path = plan["expected_esp"]["path"]
+        try:
+            if request.get("advanced_from"):
+                evidence["blank"] = blank_esp(path, esp.get("size", 0), run, full=True)
+            else:
+                evidence["blank"] = blank_esp(path, esp.get("size", 0), run)
+        except EspCheckError as exc:
+            if exc.evidence["state"] != "NONZERO":
+                raise
+            evidence["blank"] = exc.evidence
+        if evidence["blank"].get("state") == "NONZERO":
+            nvram = snapshot["boot"].get("nvram", {})
+            peer = next(r for r in plan["boot_before"]["disks"] if r["serial"] == plan["source"]["serial"])
+            if (nvram.get("code") != 0 or nvram.get("ambiguous") or not nvram.get("current")
+                    or nvram["current"] not in peer.get("nvram_entry_ids", [])
+                    or nvram.get("next") and nvram["next"] not in peer.get("nvram_entry_ids", [])):
+                raise SafetyError("BootCurrent sul membro alternativo o destinazione BootNext non verificati.")
+        if any(os.path.realpath(m["name"]) == os.path.realpath(path)
+               for p in snapshot["pools"] for m in leaves(p)):
+            raise EspInUse("La partizione selezionata è un membro ZFS attivo.")
+        verify_unused(path, esp['partuuid'])
+        evidence["unused_verified"] = True
     except (SafetyError, OSError, ValueError) as exc:
         evidence["error"] = str(exc)
-        evidence["blank"] = (exc.evidence if isinstance(exc, EspCheckError) else
-                             {"state": "NOT_STARTED", "all_zero": False, "bytes_read": 0})
+        if isinstance(exc, EspInUse):
+            evidence["usage_blocked"] = True
+        evidence.setdefault("blank", exc.evidence if isinstance(exc, EspCheckError) else
+                            {"state": "NOT_STARTED", "all_zero": False, "bytes_read": 0})
     return evidence
 
 
@@ -361,6 +384,13 @@ def build_plan(snapshot, request):
     if request.get("action") == "initialize_esp":
         snapshot = {**snapshot, "esp_initialization": initialization_evidence(snapshot, request)}
     plan = plan_replacement(snapshot, request)
+    if request.get('advanced_from'):
+        prior = load_record(request['advanced_from'])
+        if (plan['action'] != 'initialize_esp' or prior.get('helper_version') != __version__
+                or not prior.get('advanced_available') or prior.get('state') != 'PREVIEW'
+                or prior.get('fingerprint') != plan['fingerprint'] or prior.get('replacement_id') != plan.get('replacement_id')
+                or journal_identity(prior) != journal_identity(plan) or prior.get('old_guid') != plan.get('old_guid')):
+            raise SafetyError("Il piano standard di riferimento non corrisponde al nodo e alla ESP attuali. Rigenerare il piano standard.")
     if request.get("action") == "repair_boot" and request.get("replacement_id"):
         old = load_record(request["replacement_id"])
         if (old.get("action") != "replace" or old.get("host_id") != plan["host_id"]
@@ -388,6 +418,7 @@ def prepare(request):
     plan["before"] = snapshot
     plan["id"] = uuid.uuid4().hex
     plan["created_at"] = time.time()
+    plan["expires_at"] = plan["created_at"] + 600
     plan["helper_version"] = __version__
     plan["approval_digest"] = digest(plan)
     plan["state"] = "PREVIEW"
@@ -405,8 +436,22 @@ def spawn_worker(identifier, mode="--run"):
         log.close()
 
 
+@contextlib.contextmanager
+def audit_efi_approval(identifier):
+    try:
+        yield
+    except SafetyError as exc:
+        # The submit lock is held. Only append to an existing, unsubmitted preview.
+        if re.fullmatch(r"[0-9a-f]{32}", str(identifier)) and record_path(identifier).is_file():
+            pending = load_record(identifier)
+            if pending.get('action') == 'initialize_esp' and pending.get('state') == 'PREVIEW':
+                pending.setdefault('approval_refusals', []).append({'at': utcnow(), 'reason': str(exc)})
+                save_record(pending)
+        raise
+
+
 def submit(request):
-    with locked():
+    with locked(), audit_efi_approval(request.get('id')):
         from .uefi import PENDING
         plan = load_record(request.get("id"))
         if plan["state"] != "PREVIEW":
@@ -425,6 +470,11 @@ def submit(request):
             if request.get("format_partuuid_confirmation") != plan["expected_esp"]["partuuid"]:
                 raise SafetyError("Conferma esplicita della formattazione e PARTUUID mancanti.")
             plan["format_approved"] = {"partuuid": request["format_partuuid_confirmation"], "at": utcnow()}
+            if plan.get('esp_mode') == 'advanced':
+                if not all(request.get(k) is True for k in ('backup_confirmed', 'physical_confirmed', 'accept_esp_loss', 'confirm_target')):
+                    raise SafetyError("Conferme avanzate di perdita dati e identità del ricambio mancanti.")
+                plan["format_approved"].update(serial=request['serial_confirmation'], backup=True, firmware=True,
+                                               accept_esp_loss=True, confirm_target=True, advanced_from=plan['request']['advanced_from'])
         if plan.get("action") == "clean_boot" and request.get("cleanup_confirmation") != plan["missing_uuids"]:
             raise SafetyError("La lista degli UUID da rimuovere richiede conferma esplicita.")
         # A queued worker may not yet own the operation lock.
@@ -437,7 +487,9 @@ def submit(request):
         fresh = collect()
         refreshed = build_plan(fresh, plan["request"])
         if not same_plan(plan, refreshed):
-            raise SafetyError("Inventario cambiato dopo l'anteprima. Analizzare e approvare un nuovo piano.")
+            raise SafetyError("Inventario cambiato dopo l'anteprima. Analizzare e approvare un nuovo piano. " + "; ".join(refreshed["blocks"]))
+        if time.time() >= plan.get("expires_at", plan["created_at"] + 600):
+            raise SafetyError("Piano scaduto durante la rivalidazione.")
         plan["state"], plan["approved_at"] = "QUEUED", utcnow()
         save_record(plan)
         if plan.get("replacement_id"):
@@ -531,6 +583,11 @@ def verify_boot_write(plan, step):
         checked = build_plan(collect(), plan["request"])
         if not same_plan(plan, checked):
             raise SafetyError("Verifica immediata ESP fallita: formattazione annullata. " + "; ".join(checked["blocks"]))
+        if time.time() >= plan.get("expires_at", plan["created_at"] + 600):
+            raise SafetyError("Piano scaduto prima della formattazione.")
+        if plan.get("esp_mode") == "advanced" and not (plan["format_approved"].get("accept_esp_loss") and
+                plan["format_approved"].get("confirm_target") and plan["format_approved"].get("serial") == checked["target"]["serial"]):
+            raise SafetyError("Autorizzazione avanzata del target mancante.")
     elif plan.get("action") in {"initialize_esp", "repair_boot"}:
         fresh = collect()
         if plan["action"] == "repair_boot":
@@ -716,6 +773,11 @@ def _get_status(identifier):
     if plan.get("action") == "initialize_esp" and plan["state"] in {"UNKNOWN", "FAILED"}:
         if any(e.get("command") == plan["steps"][0]["command"] for e in plan.get("events", [])):
             fresh = collect()
+            pool = next((p for p in fresh["pools"] if p["guid"] == plan["pool_guid"]), None)
+            if pool and fresh.get("host_id") == plan["host_id"]:
+                plan['boot_validation'] = boot_report(fresh, pool)
+                plan['zfs_state'] = 'OK' if zfs_ready(plan, fresh, pool) else 'DA_VERIFICARE'
+                plan['firmware_observation'] = firmware_observation(plan, fresh)
             try:
                 checked = plan_replacement(fresh, {**plan["request"], "action": "repair_boot"})
             except SafetyError as exc:
@@ -756,11 +818,7 @@ def _get_status(identifier):
         plan["resilver_state"] = "OK" if ready else plan["zfs_state"]
         if is_boot and pool:
             plan["boot_validation"] = boot_report(snapshot, pool)
-            previous_nvram = plan.get('before', {}).get('boot', {}).get('nvram', {})
-            nvram = snapshot['boot'].get('nvram', {})
-            if previous_nvram.get('code') == 0 and nvram.get('code') == 0:
-                plan['firmware_observation'] = {'order_before': previous_nvram.get('order'), 'order_now': nvram.get('order'),
-                                                'current': nvram.get('current'), 'next': nvram.get('next')}
+            plan['firmware_observation'] = firmware_observation(plan, snapshot)
             rows = [r for r in plan["boot_validation"]["disks"] if r["serial"] == plan['target']['serial'] and r['identity_verified']]
             if len(rows) == 1:
                 row = rows[0]
@@ -813,7 +871,8 @@ def _get_status(identifier):
                 if plan.get("action") == "initialize_esp":
                     target_row = next((r for r in report["disks"] if r["by_id"] == plan["target"]["by_id"]), {})
                     current_esp = target_row.get("esp") or {}
-                    config_ready = bool(config_ready and plan.get("formatted_uuid")
+                    config_ready = bool(config_ready and (plan.get("esp_mode") != "advanced" or plan.get("firmware_observation"))
+                        and plan.get("formatted_uuid")
                         and current_esp.get("uuid") == plan["formatted_uuid"]
                         and current_esp.get("partuuid", "").lower() == plan["expected_esp"]["partuuid"].lower())
                 plan["state"] = "COMPLETED" if config_ready and tested else "BOOT_TEST_PENDING" if config_ready else "BOOT_REVIEW_REQUIRED"
@@ -841,6 +900,17 @@ def _get_status(identifier):
         except BlockingIOError:
             pass
     return plan
+
+
+def firmware_observation(plan, snapshot):
+    before = plan.get('before', {}).get('boot', {}).get('nvram', {})
+    after = snapshot.get('boot', {}).get('nvram', {})
+    if before.get('code') != 0 or after.get('code') != 0 or after.get('ambiguous'):
+        return {}
+    return {'order_before': before.get('order'), 'order_now': after.get('order'),
+            'current': after.get('current'), 'next': after.get('next'),
+            'changes': {k: {'prima': before.get(k), 'dopo': after.get(k)}
+                        for k in ('current', 'next', 'entries', 'entry_lines', 'order') if before.get(k) != after.get(k)}}
 
 
 def record_boot_test(request):

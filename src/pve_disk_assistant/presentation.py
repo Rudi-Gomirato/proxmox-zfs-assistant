@@ -1,6 +1,7 @@
 """Escaped, Qt-free rendering of plans and audit details."""
 import html
 import json
+from datetime import datetime, timezone
 
 from .workflow import next_step, state_label
 from .core import disk_for_member, leaves, partition_for
@@ -38,6 +39,16 @@ def scan_summary(evidence):
         message += " · Byte letti: " + str(blank.get("bytes_read", 0))
         if blank.get("expected_bytes"):
             message += " / " + str(blank["expected_bytes"])
+    if blank.get('scan_status'):
+        size = blank.get('partition_size_bytes')
+        message += ' · Scansione ' + ('completa' if blank['scan_status'] == 'complete' else 'parziale')
+        if size:
+            message += f" ({100 * blank['bytes_scanned'] / size:.1f}%)"
+        message += ' · Byte non nulli nella parte esaminata: ' + str(blank.get('nonzero_bytes_count', 'non disponibile'))
+        if blank.get('first_nonzero_offset') is not None:
+            message += ' · Offset del primo byte non nullo: ' + str(blank['first_nonzero_offset'])
+        if blank.get('stop_reason') == 'nonzero_detected':
+            message += ' · Lettura arrestata al rilevamento dei dati residui.'
     return message
 
 
@@ -76,12 +87,27 @@ def plan_html(plan, hostname="?"):
         body += "<p>WWN: " + e(plan["target"].get("wwn", "")) + "<br>PARTUUID: " + e((plan.get("expected_esp") or {}).get("partuuid", ""))
         body += "<br>Intervento ZFS: " + e(plan.get("replacement_id") or "non verificato") + "</p>"
         body += "<p><b>Conferma separata richiesta per la formattazione FAT32.</b> UUID assenti da gestire separatamente: " + e(", ".join(plan.get("missing_uuids", [])) or "nessuno") + ".</p>"
+        part = plan.get('expected_esp') or {}
+        body += '<p>Classificazione ' + e(plan.get('esp_class', 'non disponibile')) + ' · Partizione ' + e(part.get('number'))
+        body += ' · Dimensione in byte ' + e(part.get('size')) + ' · Tipo GPT ' + e(part.get('parttype'))
+        body += '<br>Membro ZFS escluso dal format ' + e(plan.get('new_member')) + '</p>'
+        if evidence.get('unused_verified'):
+            body += '<p>Verificati mount, namespace, processi, swap, configurazioni e dispositivi dipendenti.</p>'
+        if plan.get('esp_mode') == 'advanced':
+            body += '<p><b>Inizializzazione avanzata. I dati residui saranno persi.</b><br>SHA256 della ESP ' + e(evidence.get('blank', {}).get('sha256') or 'non disponibile') + '</p>'
+        peer = next((r for r in plan.get('boot_before', {}).get('disks', []) if r['by_id'] == (plan.get('source') or {}).get('by_id')), {})
+        if peer.get('esp'):
+            body += '<p>ESP di riferimento protetta ' + e(peer['esp']['path']) + ' · UUID FAT32 ' + e(peer['esp'].get('uuid')) + '</p>'
         for check in evidence.get("blank", {}).get("checks", []):
             body += "<p>Verifica: <code>" + e(" ".join(check["argv"])) + "</code> · codice " + e(check.get("code", "non disponibile")) + "</p>"
             body += "<pre>" + e(check.get("out", "")) + e(check.get("err", "")) + "</pre>"
     body += "<h3>Comandi previsti</h3><ol>" + "".join(f"<li><pre>{e(s['command'])}</pre><p>{e(s['explanation'])}</p></li>" for s in plan["steps"]) + "</ol>"
     body += "<h3>Note</h3><ul>" + "".join("<li>" + e(w) + "</li>" for w in plan["warnings"]) + "</ul>"
     body += "<p>Validità: dieci minuti, con inventario invariato. ZFS ONLINE non certifica l'avvio autonomo.</p>"
+    if plan.get('created_at') and plan.get('expires_at'):
+        def timestamp(key):
+            return datetime.fromtimestamp(plan[key], timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        body += '<p>Creato ' + timestamp('created_at') + ' · Scade ' + timestamp('expires_at') + '</p>'
     body += "<p>Nodo: " + e(hostname) + " · Pool GUID: " + e(plan["pool_guid"]) + "<br>Snapshot: " + e(plan["fingerprint"]) + "</p>"
     return body
 
@@ -105,6 +131,19 @@ def job_html(job):
         if job.get(key):
             body += '<p>' + label + ' ' + e(job[key]) + '</p>'
     fw = job.get('firmware_observation', {})
+    if job.get('action') == 'initialize_esp':
+        body += '<h3>Piano EFI · ' + e(job.get('esp_mode') or 'standard') + '</h3><p>' + e(scan_summary(job.get('initialization_evidence', {}))) + '</p>'
+        for reason in job.get('blocks', []):
+            body += '<p>' + e(reason) + '</p>'
+        for refusal in job.get('approval_refusals', []):
+            body += '<p>Approvazione negata · ' + e(refusal['at']) + ' · ' + e(refusal['reason']) + '</p>'
+        for key, label in [('created_at', 'Pianificato'), ('approved_at', 'Approvato'), ('format_approved', 'Conferme di formattazione'),
+                           ('last_checked', 'Ultima verifica')]:
+            if job.get(key):
+                body += '<p>' + label + ' · ' + e(job[key]) + '</p>'
+        for key in ('current', 'next', 'entries', 'entry_lines'):
+            if key in fw.get('changes', {}):
+                body += '<p>Firmware ' + e(key) + ' · ' + e(fw['changes'][key]) + '</p>'
     if fw and fw['order_before'] != fw['order_now']:
         body += '<p>BootOrder cambiato dopo l’anteprima. Prima ' + e(', '.join(fw['order_before'] or []))
         body += ' · Ultima lettura ' + e(', '.join(fw['order_now'] or [])) + '</p>'

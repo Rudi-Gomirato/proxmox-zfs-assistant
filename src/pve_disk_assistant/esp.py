@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import stat
 import time
+from pathlib import Path
 
 from .core import SafetyError
 
@@ -15,6 +18,10 @@ class EspCheckError(SafetyError):
     def __init__(self, message, state, bytes_read=0, **details):
         super().__init__(message)
         self.evidence = {"state": state, "all_zero": False, "bytes_read": bytes_read, **details}
+
+
+class EspInUse(SafetyError):
+    """An observed consumer prevents advanced initialization."""
 
 
 def verify_empty_signatures(probe, wipe, path=None):
@@ -49,27 +56,39 @@ def verify_empty_signatures(probe, wipe, path=None):
         raise EspCheckError(reason + " Lettura integrale non avviata; formattazione annullata.", "PROBE_FAILED")
 
 
-def read_all_zero(stream, size, deadline):
-    """Every byte must be read. Sampling and an absent FSTYPE are insufficient."""
-    total = 0
+def read_all_zero(stream, size, deadline, full=False):
+    """Stop on the first nonzero chunk in standard mode. Bind an advanced plan to every byte."""
+    total = count = 0
+    first = None
+    checksum = hashlib.sha256() if full else None
+    def metrics(reason):
+        return dict(partition_size_bytes=size, bytes_scanned=total, scan_status="complete" if total == size else "partial",
+                    nonzero_detected=count > 0, nonzero_bytes_count=count, first_nonzero_offset=first,
+                    total_nonzero_bytes=count if total == size else None, stop_reason=reason)
     while total < size:
         if time.monotonic() > deadline:
-            raise EspCheckError("Lettura integrale ESP scaduta: nessuna formattazione.", "TIMEOUT", total)
+            raise EspCheckError("Lettura integrale ESP scaduta: nessuna formattazione.", "TIMEOUT", total, **metrics("timeout"))
         try:
             data = stream.read(min(4 * 1024 ** 2, size - total))
         except OSError as exc:
-            raise EspCheckError("Errore di lettura ESP: " + str(exc), "READ_ERROR", total) from exc
+            raise EspCheckError("Errore di lettura ESP: " + str(exc), "READ_ERROR", total, **metrics("read_error")) from exc
         if not data:
-            raise EspCheckError("Lettura ESP incompleta: nessuna formattazione.", "INCOMPLETE", total)
+            raise EspCheckError("Lettura ESP incompleta: nessuna formattazione.", "INCOMPLETE", total, **metrics("short_read"))
         nonzero = len(data) - data.count(b"\0")
+        if nonzero and first is None:
+            first = total + re.search(rb'[^\x00]', data).start()
+        count += nonzero
+        if checksum is not None:
+            checksum.update(data)
         total += len(data)
-        if nonzero:
+        if nonzero and not full:
             raise EspCheckError("La ESP contiene byte non nulli: possibili dati da preservare, nessuna formattazione.",
-                                "NONZERO", total, nonzero_bytes_found=nonzero)
-    return {"state": "EMPTY", "all_zero": True, "bytes_read": total, "nonzero_bytes_found": 0}
+                                "NONZERO", total, nonzero_bytes_found=count, **metrics("nonzero_detected"))
+    return {"state": "NONZERO" if count else "EMPTY", "all_zero": count == 0, "bytes_read": total,
+            "nonzero_bytes_found": count, "sha256": checksum.hexdigest() if checksum else None, **metrics("end")}
 
 
-def blank_esp(path, expected_size, run):
+def blank_esp(path, expected_size, run, *, full=False):
     if not 0 < expected_size <= MAX_ESP_BYTES:
         raise SafetyError("Dimensione ESP non verificata o superiore al limite di scansione di 4 GiB.")
     checks = []
@@ -77,7 +96,7 @@ def blank_esp(path, expected_size, run):
         for argv in (["blkid", "-p", "-o", "export", path], ["wipefs", "--json", path]):
             checks.append({"argv": argv, **run(argv)})
         verify_empty_signatures(checks[0], checks[1], path)
-        result = read_block_device(path, expected_size)
+        result = read_block_device(path, expected_size, full=True) if full else read_block_device(path, expected_size)
         return {**result, "expected_bytes": expected_size, "checks": checks}
     except (SafetyError, OSError) as exc:
         error = exc if isinstance(exc, EspCheckError) else EspCheckError(str(exc), "READ_ERROR")
@@ -87,7 +106,7 @@ def blank_esp(path, expected_size, run):
         raise error from exc
 
 
-def read_block_device(path, expected_size):
+def read_block_device(path, expected_size, full=False):
     # Linux O_EXCL rejects mounted/in-use block devices; opening is read-only.
     import fcntl
     import struct
@@ -97,4 +116,47 @@ def read_block_device(path, expected_size):
         size = struct.unpack("Q", fcntl.ioctl(stream.fileno(), 0x80081272, bytes(8)))[0]  # BLKGETSIZE64
         if size != expected_size:
             raise SafetyError("Dimensione ESP cambiata: nessuna formattazione.")
-        return read_all_zero(stream, size, time.monotonic() + 60)
+        return read_all_zero(stream, size, time.monotonic() + 60, full)
+
+
+def verify_unused(path, partuuid, proc=Path("/proc"), etc=Path("/etc")):
+    """Check aliases by device number, including other processes' mount namespaces."""
+    dev = os.stat(path).st_rdev
+    number = f"{os.major(dev)}:{os.minor(dev)}"
+    if not dev:
+        raise SafetyError("Destinazione non riconosciuta come dispositivo a blocchi.")
+    namespaces = set()
+    for process in proc.iterdir():
+        if not process.name.isdecimal():
+            continue
+        try:
+            namespace = os.readlink(process / "ns/mnt")
+            if namespace not in namespaces:
+                mounts = (process / "mountinfo").read_text().splitlines()
+                if any(line.split()[2] == number for line in mounts):
+                    raise EspInUse("ESP montata in un namespace del nodo.")
+                namespaces.add(namespace)
+            for fd in (process / "fd").iterdir():
+                try:
+                    opened = os.stat(fd)
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISBLK(opened.st_mode) and opened.st_rdev == dev:
+                    raise EspInUse("ESP aperta da un processo sul nodo.")
+        except (FileNotFoundError, ProcessLookupError):
+            if not process.exists() or not (process / "ns/mnt").exists():
+                continue
+            raise
+    if not namespaces:
+        raise SafetyError("Namespace di montaggio non verificabili.")
+    for file, column in ((proc / "swaps", 0), (etc / "fstab", 0), (etc / "crypttab", 1)):
+        if file == etc / "crypttab" and not file.exists():
+            continue
+        for line in file.read_text().splitlines():
+            fields = line.partition("#")[0].split()
+            if len(fields) <= column:
+                continue
+            source = fields[column]
+            if (source.lower() == "partuuid=" + partuuid.lower() or
+                    source.startswith("/dev/") and os.path.realpath(source) == os.path.realpath(path)):
+                raise EspInUse("ESP in uso o configurata in " + str(file))

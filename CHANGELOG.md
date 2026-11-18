@@ -1,5 +1,11 @@
 # Modifiche
 
+## 0.5.2 — 18 novembre 2026
+
+- Percorso avanzato per una ESP con dati residui dopo il resilver. L’helper genera un piano distinto, verifica GPT, membro ZFS, disco alternativo, utilizzo della partizione e impronta del contenuto prima del format.
+- Diagnostica con stato della scansione, byte letti, percentuale, byte non nulli osservati e primo offset. Le conferme includono perdita dei dati della sola ESP e seriale esatto.
+- Anteprima con motivo del blocco, scadenza e rigenerazione. Storico con piano standard collegato, conferme, rifiuti e differenze delle variabili firmware. Prove automatiche con dati sintetici.
+
 ## 0.5.1 — 18 novembre 2026
 
 - Anteprima e approvazione EFI dalle sezioni Avvio EFI e Interventi, anche dopo la chiusura dell’app. Il nodo identifica il membro attuale del mirror e controlla il PARTUUID registrato prima del format.

@@ -97,6 +97,44 @@ def test_efi_preview_stays_in_originating_section(app, tmp_path, monkeypatch, se
     window.close()
 
 
+def test_advanced_dialog_requires_exact_serial_all_checks_and_regenerates(app, tmp_path, monkeypatch):
+    import time
+    from PySide6.QtWidgets import QDialog, QCheckBox, QLineEdit
+    from test_boot import rebuilt
+    from pve_disk_assistant.core import plan_replacement
+    win = Window(tmp_path, demo=False)
+    snap = rebuilt()
+    win.render_snapshot(snap)
+    target = snap['disks'][-1]
+    req = {'action': 'initialize_esp', 'pool_guid': '1000', 'target': target['by_id'], 'advanced_from': 'old'}
+    plan = plan_replacement(snap, req)
+    plan.update(esp_mode='advanced', expires_at=time.time() + 500, request=req, blocks=[], id='new')
+    monkeypatch.setattr(win, 'writable_uefi', lambda: True)
+    win.show_efi_plan(plan)
+    dialog = win.findChild(QDialog)
+    buttons = {b.text(): b for b in dialog.findChildren(QPushButton)}
+    approve = buttons['Approva piano EFI']
+    checks = dialog.findChildren(QCheckBox)
+    assert len(checks) == 4
+    for c in checks:
+        c.setChecked(True)
+    serial = dialog.findChild(QLineEdit)
+    serial.setText(target['serial'] + ' ')
+    assert not approve.isEnabled()
+    serial.setText(target['serial'])
+    assert approve.isEnabled()
+    checks[0].setChecked(False)
+    assert not approve.isEnabled()
+    monkeypatch.setattr(time, 'time', lambda: plan['expires_at'] + 1)
+    checks[0].setChecked(True)
+    assert not approve.isEnabled()
+    calls = []
+    monkeypatch.setattr(win, 'asynchronous', lambda *args: calls.append(args))
+    buttons['Rigenera piano'].click()
+    assert len(calls) == 1 and not dialog.isVisible()
+    win.close()
+
+
 def test_gui_renders_both_topologies_and_preserves_approval_boundary(app, tmp_path):
     window = Window(tmp_path, demo=False)
     window.backend = DemoBackend()

@@ -6,6 +6,7 @@ import html
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -569,15 +570,70 @@ class Window(UefiMixin, QMainWindow):
         layout.addWidget(backup)
         layout.addWidget(physical)
         backend = self.backend
+        advanced = plan.get('esp_mode') == 'advanced'
+        checks = [backup, physical]
+        serial_input = QLineEdit(dialog)
+        serial_input.setVisible(advanced)
+        if advanced:
+            dialog.setWindowTitle('Inizializzazione avanzata ESP')
+            for label in ('Accetto la perdita del contenuto della sola ESP selezionata.',
+                          'Confermo che questo è il disco che intendo ripristinare.'):
+                check = QCheckBox(label)
+                checks.append(check)
+                layout.addWidget(check)
+            serial_input.setPlaceholderText('Digita esattamente il seriale del ricambio')
+            layout.addWidget(serial_input)
+        status = QLabel()
+        status.setWordWrap(True)
+        status.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(status)
         approve = QPushButton('Approva piano EFI')
-        approve.setEnabled(False)
+        expires = plan.get('expires_at')
+        def regenerate(advanced_request=False):
+            request = dict(plan['request'])
+            request.pop('advanced_from', None)
+            if advanced_request:
+                request['advanced_from'] = plan['id']
+            dialog.reject()
+            self.asynchronous(lambda: backend.rpc({'op': 'plan', 'request': request}), self.show_efi_plan,
+                              'Nuovo preflight EFI sul nodo…')
+        start = None
+        if plan.get('advanced_available') and self.writable_uefi() and not plan.get('read_only'):
+            start = QPushButton('Inizializzazione avanzata ESP')
+            start.clicked.connect(lambda: regenerate(True))
+            layout.addWidget(start)
+        regen = QPushButton('Rigenera piano')
+        regen.clicked.connect(lambda: regenerate())
+        layout.addWidget(regen)
         def toggle():
-            approve.setEnabled(backup.isChecked() and physical.isChecked() and not plan['blocks']
-                               and not plan.get('read_only') and self.writable_uefi())
-        backup.toggled.connect(toggle)
-        physical.toggled.connect(toggle)
+            reason = ''
+            if self.busy:
+                reason = 'Operazione in corso sul nodo.'
+            elif expires and time.time() >= expires:
+                reason = 'Piano scaduto. Rigenerare il piano.'
+            elif plan['blocks']:
+                reason = ' · '.join(plan['blocks'])
+            elif plan.get('read_only') or not self.writable_uefi():
+                reason = 'Anteprima in sola lettura.'
+            elif not all(check.isChecked() for check in checks):
+                reason = 'Completa le conferme richieste.'
+            elif advanced and serial_input.text() != plan['target']['serial']:
+                reason = 'Il seriale inserito non corrisponde al disco.'
+            approve.setEnabled(not reason)
+            regen.setEnabled(not self.busy)
+            if start is not None:
+                start.setEnabled(not self.busy and (not expires or time.time() < expires))
+            status.setText(reason or 'Piano pronto per l’approvazione.')
+        for check in checks:
+            check.toggled.connect(toggle)
+        serial_input.textChanged.connect(toggle)
+        timer = QTimer(dialog)
+        timer.timeout.connect(toggle)
+        timer.start(500)
+        toggle()
         approve.clicked.connect(dialog.accept)
-        dialog.accepted.connect(lambda: self.execute_approved(plan) if self.backend is backend else None)
+        dialog.accepted.connect(lambda: self.execute_approved(plan, serial_input.text() if advanced else None)
+                                if self.backend is backend else None)
         layout.addWidget(approve)
         close = QPushButton('Chiudi')
         close.clicked.connect(dialog.reject)
@@ -1072,15 +1128,22 @@ class Window(UefiMixin, QMainWindow):
             return
         self.execute_approved(plan)
 
-    def execute_approved(self, plan):
+    def execute_approved(self, plan, advanced_serial=None):
         if self.busy or plan['blocks'] or plan.get('read_only') or self.is_demo():
             return
         label = "disco da escludere" if plan.get("action") == "offline" else "disco selezionato"
-        serial, ok = QInputDialog.getText(self, "Approvazione del piano", "Digita il seriale del SOLO " + label + ":\n" + plan["target"]["serial"])
-        if not ok:
-            return
+        if plan.get('esp_mode') == 'advanced':
+            if advanced_serial != plan["target"]["serial"]:
+                return
+            serial = advanced_serial
+        else:
+            serial, ok = QInputDialog.getText(self, "Approvazione del piano", "Digita il seriale del SOLO " + label + ":\n" + plan["target"]["serial"])
+            if not ok:
+                return
         request = {"op": "submit", "id": plan["id"], "approval_digest": plan["approval_digest"],
-                   "serial_confirmation": serial.strip(), "backup_confirmed": True, "physical_confirmed": True}
+                   "serial_confirmation": serial, "backup_confirmed": True, "physical_confirmed": True}
+        if plan.get('esp_mode') == 'advanced':
+            request.update(accept_esp_loss=True, confirm_target=True)
         if plan.get('action') == 'clean_boot':
             request['cleanup_confirmation'] = plan['missing_uuids']
         if plan.get('action') == 'initialize_esp':

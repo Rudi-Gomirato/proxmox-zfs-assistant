@@ -47,6 +47,7 @@ def replacement(monkeypatch, tmp_path):
         plan["expected_esp"] = {**part, "path": target["by_id"] + "-part2"}
     monkeypatch.setattr(node, "bind_esp", bind)
     monkeypatch.setattr(node, "blank_esp", lambda path, size, run: {"all_zero": True, "bytes_read": size})
+    monkeypatch.setattr(node, "verify_unused", lambda *args: None)
     monkeypatch.setattr(node, "spawn_worker", lambda *a: 1)
     return parent, fresh, target, part
 

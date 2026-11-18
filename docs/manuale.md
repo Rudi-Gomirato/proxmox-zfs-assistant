@@ -1,5 +1,7 @@
 # Manuale operativo
 
+La **0.5.2** permette di inizializzare una ESP con dati residui dopo il resilver. Aprire il piano standard sul ricambio, leggere il motivo del blocco e selezionare **Inizializzazione avanzata ESP** quando disponibile. La procedura richiede lettura completa, verifica del disco alternativo e conferma della perdita dei dati. [Guida passo per passo](nuova-esp.md)
+
 Con la **0.5.1**, aggiornare l’helper dalla scheda **Connessione** a comandi conclusi. Se il resilver è già terminato, selezionare il ricambio in **Avvio EFI** oppure recuperare l’intervento dal nodo. Nell’anteprima confrontare seriale, GUID ZFS e PARTUUID. In caso di interruzione consultare il journal prima di generare un altro piano. La prova di autonomia fisica rimane da registrare dopo il collaudo BootNext. [Procedura e limiti del recupero EFI](nuova-esp.md)
 
 Aggiornamento **0.5.0**: [identità persistente e test UEFI con BootNext](test-uefi-0.5.md). Il test del percorso EFI con entrambi i dischi collegati è distinto dalle prove di autonomia fisica descritte sotto. Per la nuova ESP resta valida la [procedura con conferma di formattazione](nuova-esp.md).

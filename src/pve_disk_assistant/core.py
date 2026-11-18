@@ -530,6 +530,23 @@ def plan_boot_repair(snapshot, request, initialize=False):
                 for d in snapshot['disks'] for p in d.get('partitions', [])) != 1):
         blocks.append("UUID FAT32 non verificato o duplicato.")
     evidence = snapshot.get("esp_initialization", {}) if initialize else {}
+    advanced = bool(initialize and request.get("advanced_from"))
+    scan = evidence.get("blank", {})
+    residual = scan.get("state") == "NONZERO" and evidence.get("unused_verified") is True
+    classification = "SCAN_INCOMPLETE"
+    if not target.get("identity_verified") or not esp or not path:
+        classification = "IDENTITY_AMBIGUOUS"
+    elif esp.get("mounts") or target.get("holders") or evidence.get("usage_blocked"):
+        classification = "MOUNTED_OR_IN_USE"
+    elif info.get("probe", {}).get("TYPE") or esp.get("fstype"):
+        classification = ("VALID_ESP" if all(row["checks"][k]["state"] == "OK" for k in ("fat32", "filesystem", "identity"))
+                          else "RECOGNIZED_OTHER_FS")
+    elif scan.get("state") in {"READ_ERROR", "PROBE_FAILED"}:
+        classification = "DEVICE_ERROR"
+    elif scan.get("state") == "NONZERO":
+        classification = "UNKNOWN_RESIDUAL_DATA"
+    elif scan.get("all_zero"):
+        classification = "EMPTY_ZEROED"
     if initialize:
         syntax = snapshot.get("boot", {}).get("command_syntax", {})
         if not all(syntax.get(k) for k in ["format", "init", "refresh", "status"] + (["grub"] if mode == "grub" else [])):
@@ -540,8 +557,24 @@ def plan_boot_repair(snapshot, request, initialize=False):
             blocks.append("Bootloader del membro di riferimento non verificato; nessuna migrazione implicita.")
         if not evidence.get("replacement_id"):
             blocks.append("Sostituzione precedente e PARTUUID non verificati nel registro del nodo.")
-        if evidence.get("error") or not evidence.get("blank", {}).get("all_zero"):
-            blocks.append(evidence.get("error") or "Assenza di dati non dimostrata: occorrono verifica delle firme e lettura integrale della ESP.")
+        if evidence.get("error"):
+            blocks.append(evidence["error"])
+        elif advanced:
+            if (not residual or scan.get("scan_status") != "complete" or not scan.get("sha256")
+                    or scan.get("bytes_scanned") != esp.get("size") or not scan.get("nonzero_bytes_count")):
+                blocks.append("La scansione avanzata deve verificare l'intera ESP e confermare i dati residui.")
+        elif not residual and not scan.get("all_zero"):
+            blocks.append("Assenza di dati non dimostrata: occorrono verifica delle firme e lettura integrale della ESP.")
+        if residual and (info.get("signatures") != [] or not target.get("model")
+                         or target.get("size", 0) <= 0 or not esp.get("number")):
+            blocks.append("Firme, modello, capacità o numero della ESP non verificabili.")
+        if residual:
+            table = target.get("table") or {}
+            matches = [p for p in table.get("partitions", []) if esp and
+                       p.get("uuid", "").lower() == esp.get("partuuid", "").lower()
+                       and p.get("node") == esp.get("path") and p.get("type", "").lower() == ESP]
+            if not table.get("id") or len(matches) != 1:
+                blocks.append("GUID della tabella GPT o della ESP non confermato da sfdisk.")
         if not composite_identity_verified(snapshot["disks"], target):
             blocks.append("Identità fisica non univoca: verificare WWN, seriale e alias persistente del disco; nessuna formattazione.")
         zfs_parts = [p for p in target.get("partitions", []) if p.get("parttype", "").lower() == ZFS
@@ -555,7 +588,7 @@ def plan_boot_repair(snapshot, request, initialize=False):
     def add(argv, message, phase="boot"):
         steps.append({"argv": argv, "command": command_text(argv), "explanation": message, "phase": phase})
     if initialize and path:
-        add(["proxmox-boot-tool", "format", path], "Crea FAT32 sulla sola nuova ESP, dopo verifica integrale e conferma esplicita; non modifica GPT o ZFS.")
+        add(["proxmox-boot-tool", "format", path], "Crea FAT32 sulla sola ESP selezionata. Il contenuto precedente andrà perso.")
     if mode != "unknown" and path:
         add(["proxmox-boot-tool", "init", path] + (["grub"] if mode == "grub" else []),
             "Installa il bootloader sulla ESP selezionata. L'installer Proxmox può aggiornare le voci firmware e BootOrder durante init.")
@@ -564,7 +597,11 @@ def plan_boot_repair(snapshot, request, initialize=False):
     missing = {s["argv"][0] for s in steps} - set(snapshot.get("tools", []))
     if missing or not steps:
         blocks.append("Strumenti o modalità di ripristino mancanti: " + ", ".join(sorted(missing)))
+    offer_advanced = bool(initialize and not advanced and residual and not blocks)
+    if initialize and not advanced and residual:
+        blocks.append("La ESP contiene dati residui non riconosciuti. Occorre un nuovo piano di inizializzazione avanzata.")
     return {"action": "initialize_esp" if initialize else "repair_boot", "request": deepcopy(request), "host_id": snapshot.get("host_id"),
+        "esp_class": classification, "esp_mode": "advanced" if advanced else "standard", "advanced_available": offer_advanced,
         "initialization_evidence": deepcopy(evidence), "replacement_id": evidence.get("replacement_id"),
         "missing_uuids": snapshot.get("boot", {}).get("missing_uuids", []),
         "pool": pool["name"], "pool_guid": pool["guid"], "role": pool["role"], "raid": raid_label(pool),
@@ -648,7 +685,8 @@ def anonymize(value):
             return {k: redact(v, k) for k, v in item.items()}
         if isinstance(item, list):
             return [redact(v, key) for v in item]
-        safe = {"state", "role", "kind", "section", "fstype", "helper_version", "type", "collected_at"}
+        safe = {"state", "role", "kind", "section", "fstype", "helper_version", "type", "collected_at",
+                "esp_mode", "esp_class", "scan_status", "stop_reason", "action", "phase"}
         if isinstance(item, str) and item and key not in safe:
             if item not in aliases:
                 counter[0] += 1

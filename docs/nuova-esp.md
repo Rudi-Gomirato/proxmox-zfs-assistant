@@ -1,4 +1,4 @@
-# Inizializza nuova ESP dopo sostituzione disco — 0.5.1
+# Inizializza nuova ESP dopo sostituzione disco — 0.5.2
 
 Questa procedura completa dall'app la fase EFI di una sostituzione del mirror root ZFS. È distinta dal **Piano ripristino della sola ESP selezionata**, che richiede una FAT32 già coerente e non propone mai una formattazione.
 
@@ -18,11 +18,19 @@ Aggiornare il client Windows e, dalla scheda **Connessione**, usare **Installa /
 - Identità del ricambio per by-id, seriale univoco e WWN normalizzato; un WWN condiviso richiede anche un alias by-id indipendente contenente il seriale, univoco nell'inventario e verificato sullo stesso dispositivo in esecuzione. WWN assente o identità ambigua restano bloccanti. PARTUUID dell'ESP corrispondente a quello registrato **prima** del comando di sostituzione. Nel registro del nodo deve esserci un `replace` terminato con successo sullo stesso host e pool.
 - ESP GPT unica, non montata, sul nuovo disco, distinta dalla partizione ZFS e senza dispositivi dipendenti. Il membro di riferimento deve avere una configurazione di avvio verificata.
 - `blkid -p` e `wipefs --json` devono escludere firme. Un risultato `blkid` contenente solo metadati GPT `PART_ENTRY_*` è distinto da un filesystem: il solo codice di uscita non basta.
-- Lettura in sola lettura di **tutti i byte dell'ESP**: devono essere nulli. Non si usano campionamenti. Dimensione verificata sul dispositivo a blocchi, massimo 4 GiB, scadenza della lettura 60 secondi. Errori, letture incomplete, firme sconosciute o anche un solo byte non nullo bloccano il piano.
+- Nel percorso standard, tutti i byte della ESP devono essere nulli. La scansione si ferma al primo blocco contenente dati residui. L’anteprima mostra i byte esaminati, i byte non nulli trovati nella porzione letta, il primo offset e il motivo dell’arresto. Limiti per lettura: 4 GiB e 60 secondi.
 
 I controlli vengono ripetuti all'approvazione, all'avvio del worker e subito prima del format. Durante la manutenzione lasciare i dischi in gestione al solo intervento approvato. Il comando Proxmox `init` richiama l’installer del bootloader, che può aggiornare il firmware. Prima dell’esecuzione la GUI richiede di autorizzare anche questo effetto. Lo storico confronta BootOrder con l’anteprima. Il piano separato per registrare una voce mancante usa invece `--create-only`.
 
-Un ricambio usato può avere dati residui anche senza firme: non è considerato vuoto. La procedura non cancella quei dati per aggirare il blocco. Un registro storico privo di WWN, PARTUUID o esito del replace non viene ricostruito sulla base di una dichiarazione dell'utente: resta necessaria una diagnosi dedicata.
+## Quando il piano segnala dati residui
+
+1. Confrontare seriale, modello, percorso by-id, PARTUUID, GUID ZFS e disco di riferimento. I byte non riconosciuti possono avere valore. Se occorre conservarli, chiudere il piano prima di approvare.
+2. Quando compare **Inizializzazione avanzata ESP**, aprirla. Il nodo crea un nuovo piano e legge l’intera partizione. L’impronta SHA256 vincola l’approvazione al contenuto esaminato. Le letture incomplete o fallite richiedono una nuova diagnosi.
+3. Verificare nell’anteprima la dimensione della ESP e la partizione ZFS esclusa dal format. Il nodo controlla mount nei namespace dei processi, descrittori aperti, dispositivi dipendenti, swap e configurazioni persistenti. BootCurrent deve indicare una voce coerente con la ESP del disco di riferimento.
+4. Confermare backup, manutenzione, effetti del bootloader sul firmware, perdita dei dati della sola ESP e identità del ricambio. Digitare il seriale esattamente come rilevato. Premere **Approva piano EFI** e controllare il PARTUUID nell’ultima conferma.
+5. Il piano vale dieci minuti. **Rigenera piano** riparte dal preflight e azzera le conferme. Durante l’intervento evitare operazioni concorrenti da altri strumenti di amministrazione. I controlli dell’app vincolano le sue sessioni, mentre gli strumenti esterni hanno accesso autonomo ai dispositivi.
+
+Se la topologia è cambiata, il journal è incompleto, il firmware non identifica il membro alternativo o la ESP presenta firme di un filesystem, la modalità avanzata resta bloccata. Una FAT32 coerente dispone del piano di ripristino dedicato.
 
 ## Comandi e verifiche successive
 
