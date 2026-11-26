@@ -3,7 +3,7 @@ import html
 import json
 from datetime import datetime, timezone
 
-from .workflow import next_step, state_label
+from .workflow import next_step, replacement_phases, state_label
 from .core import disk_for_member, leaves, partition_for
 
 e = lambda value: html.escape(str(value))
@@ -15,16 +15,23 @@ def disk_html(disk, snapshot=None):
     primary = disk.get('by_id') if disk.get('identity_verified') else 'Disk by ID non verificato'
     fields = [('Disk by ID', primary), ('Modello', disk.get('model')), ('Seriale', disk.get('serial')),
               ('Dispositivo Linux', disk.get('path')), ('WWN', disk.get('wwn') or 'Non disponibile')]
+    smart = disk.get("smart", {})
+    fields.append(("Capacità esatta", f"{disk['size']} byte" if disk.get("size") else "N/D"))
+    health = "Allarme" if smart.get("passed") is False or smart.get("exit_code", 0) & 248 else (
+        "OK" if smart.get("passed") is True and not smart.get("exit_code", 0) & 7 else "Non disponibile")
+    fields.append(("SMART", health))
     for pool in (snapshot or {}).get('pools', []):
         for member in leaves(pool):
             if disk_for_member(snapshot, member) == disk:
                 part = partition_for(disk, member['name']) or {}
                 persistent = next((p for p in part.get('aliases', []) if p.startswith('/dev/disk/by-id/')), '')
-                fields += [('Pool / stato', pool['name'] + ' / ' + member['state']), ('GUID ZFS', member.get('guid')),
+                fields += [('Pool / stato', pool['name'] + ' / ' + member['state']), ('Ruolo del pool', pool.get('role')), ('GUID ZFS', member.get('guid')),
                            ('Partizione ZFS', persistent or part.get('path') or member['name']), ('Dispositivo ZFS Linux', part.get('path') or member['name'])]
     for part in disk.get('partitions', []):
         if part.get('partuuid'):
             fields.append(('Partizione / PARTUUID', part['path'] + ' / ' + part['partuuid']))
+        if part.get('uuid'):
+            fields.append(('Filesystem / UUID', (part.get('fstype') or 'N/D') + ' / ' + part['uuid']))
     return '<table>' + ''.join('<tr><td><b>' + e(k) + '</b></td><td>' + e(v or 'N/D') + '</td></tr>' for k, v in fields) + '</table>' + ''.join('<p>' + e(w) + '</p>' for w in disk.get('identity_warnings', []))
 
 
@@ -115,6 +122,10 @@ def plan_html(plan, hostname="?"):
 def job_html(job):
     body = f"<h2>{e(job.get('pool', 'Intervento'))} · {e(state_label(job['state']))}</h2><p>ID {e(job['id'])} · {e(job['state'])}</p>"
     body += "<p><b>Prossimo passo:</b> " + e(next_step(job)) + "</p>"
+    phases = replacement_phases(job)
+    if phases:
+        body += "<table>" + "".join("<tr><td>" + e(label) + "</td><td>" + e(value) + "</td></tr>"
+                                   for label, value in phases.items()) + "</table>"
     if job.get('target'):
         body += '<h3>Identità registrata alla creazione</h3>'
         body += disk_html(job['target'], job.get('before'))

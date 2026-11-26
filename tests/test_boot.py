@@ -24,6 +24,7 @@ def defective_efi():
 
 def rebuilt():
     snapshot = inventory()
+    snapshot["pools"][0]["scan"] = "resilvered 45G in 00:38:00 with 0 errors on synthetic-date"
     original = snapshot["disks"][1]
     target = next(d for d in snapshot["disks"] if d["serial"] == "DEMO_NEW")
     target["partitions"] = deepcopy(original["partitions"])

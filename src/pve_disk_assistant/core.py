@@ -10,7 +10,7 @@ import json
 import re
 import shlex
 from copy import deepcopy
-from .identity import composite_identity_verified, wwn_peers
+from .identity import composite_identity_verified, physical_identity_verified, wwn_peers
 
 GOOD = {"ONLINE", "HEALTHY"}
 BAD = {"FAULTED", "UNAVAIL", "OFFLINE", "REMOVED", "DEGRADED"}
@@ -24,6 +24,15 @@ RESERVED = "6a945a3b-1dd2-11b2-99a6-080020736631"
 
 class SafetyError(ValueError):
     """The observed system does not satisfy the operation's preconditions."""
+
+
+def lab_version_supported(snapshot):
+    """Minor releases covered by the current lab profiles, never a production certification."""
+    return bool(re.match(r"^pve-manager/(?:8\.4|9\.[01])(?:\.|/|$)", snapshot.get("pve_version", "")))
+
+
+PRODUCTION_BLOCK = "Profilo produzione non abilitato nella release candidata. Collaudo hardware richiesto."
+VERSION_BLOCK = "Versione Proxmox fuori dai profili di laboratorio 8.4, 9.0 e 9.1. Disponibile la diagnostica."
 
 
 def digest(value):
@@ -130,9 +139,14 @@ def merge_guids(pools, guid_text, pool_guids):
         b = list(walk(candidate)) if candidate else []
         if len(a) != len(b) or any(
             x["state"] != y["state"] or len(x["children"]) != len(y["children"])
+            or (x["name"].isdecimal() and x["name"] != y["name"])
             or x.get("section", "data") != y.get("section", "data") for x, y in zip(a, b)
         ):
             pool["warnings"].append("Topologia cambiata tra lettura dei percorsi e dei GUID. Aggiornare.")
+            continue
+        identifiers = [node["name"] for node in b[1:] if not node["children"]]
+        if any(not value.isdecimal() for value in identifiers) or len(set(identifiers)) != len(identifiers):
+            pool["warnings"].append("GUID dei membri assenti o duplicati. Associazione non verificabile.")
             continue
         for x, y in zip(a[1:], b[1:]):
             if y["name"].isdigit():
@@ -171,21 +185,22 @@ def storage_config(text):
     return result
 
 
+def device_matches(device, name):
+    paths = [device["path"], device.get("by_id"), *device.get("aliases", [])]
+    if not name or name.isdecimal():
+        return False
+    return any(path and (name == path or name == path.rsplit("/", 1)[-1]) for path in paths)
+
+
 def disk_for(snapshot, path):
-    if not path:
-        return None
-    matches = []
-    for disk in snapshot.get("disks", []):
-        if path in [disk["path"], disk.get("by_id", ""), *disk.get("aliases", [])]:
-            matches.append(disk)
-        elif any(path in [p['path'], *p.get('aliases', [])] for p in disk.get('partitions', [])):
-            matches.append(disk)
+    matches = [disk for disk in snapshot.get("disks", [])
+               if any(device_matches(device, path) for device in [disk, *disk.get("partitions", [])])]
     return matches[0] if len(matches) == 1 else None
 
 
 def partition_for(disk, path):
-    return next((p for p in disk.get("partitions", [])
-                 if path in [p["path"], *p.get("aliases", [])]), None)
+    matches = [part for part in disk.get("partitions", []) if device_matches(part, path)]
+    return matches[0] if len(matches) == 1 else None
 
 
 def disk_for_member(snapshot, member):
@@ -293,12 +308,14 @@ def plan_replacement(snapshot, request):
     if old is None or target is None:
         raise SafetyError("Membro da sostituire o disco nuovo non identificato.")
     profile = request.get("profile", "laboratorio")
-    if profile not in {"laboratorio", "produzione"}:
+    if profile == "produzione":
+        blocks.append(PRODUCTION_BLOCK)
+    if profile not in {"laboratorio", "laboratorio_hot_swap", "produzione"}:
         raise SafetyError("Profilo hardware sconosciuto.")
     if snapshot.get("demo"):
         blocks.append("Modalità dimostrativa: nessun comando viene eseguito su server.")
-    if not re.match(r"^pve-manager/(8|9)\.", snapshot.get("pve_version", "")):
-        blocks.append("Versione Proxmox diversa dalle famiglie 8 e 9 riconosciute.")
+    if not lab_version_supported(snapshot):
+        blocks.append(VERSION_BLOCK)
     if not snapshot.get("complete") or snapshot.get("issues"):
         blocks.append("Inventario incompleto: risolvere gli errori di raccolta prima di procedere.")
     if not snapshot.get("host_id") or not pool["guid"].isdigit() or not old["guid"].isdigit():
@@ -333,7 +350,7 @@ def plan_replacement(snapshot, request):
     for member in survivors:
         if member["state"] not in GOOD or len(member["errors"]) != 3 or any(member["errors"]):
             blocks.append("Un membro rimanente ha errori o stato non sano: " + member["name"])
-        if not disk_for_member(snapshot, member):
+        if not physical_identity_verified(snapshot["disks"], disk_for_member(snapshot, member)):
             blocks.append("Identità fisica di un membro rimanente non risolta.")
     used = [disk_for_member(snapshot, n) for p in snapshot["pools"] for n in leaves(p)]
     if target in used:
@@ -341,7 +358,7 @@ def plan_replacement(snapshot, request):
     serial = target.get("serial", "").strip()
     if not serial or sum(d.get("serial", "").strip() == serial for d in snapshot["disks"]) != 1:
         blocks.append("Seriale della destinazione assente o non univoco.")
-    if not target.get("by_id", "").startswith("/dev/disk/by-id/") or not target.get("identity_verified"):
+    if not physical_identity_verified(snapshot["disks"], target):
         blocks.append("Percorso persistente della destinazione non verificato.")
     if target.get("partitions") or target.get("signatures") or target.get("mounts") or target.get("holders") or target.get("ro"):
         blocks.append("Il nuovo disco non è vuoto e libero oppure è in sola lettura.")
@@ -361,7 +378,7 @@ def plan_replacement(snapshot, request):
         blocks.append("Il nuovo disco coincide con il disco da sostituire.")
     if profile == "laboratorio" and old_disk is not None:
         blocks.append("Laboratorio senza hot swap: spegnere, sostituire e riaccendere prima di pianificare il nuovo disco.")
-    if profile == "produzione" and not request.get("hot_swap_confirmed"):
+    if profile in {"laboratorio_hot_swap", "produzione"} and not request.get("hot_swap_confirmed"):
         blocks.append("Confermare il supporto hot swap del modello e dell'alloggiamento.")
     for member in survivors:
         d = disk_for(snapshot, member["name"])
@@ -487,8 +504,8 @@ def plan_boot_repair(snapshot, request, initialize=False):
         blocks.append("Ripristino EFI supportato solo sul mirror root ZFS di due membri senza vdev ausiliari.")
     if not snapshot.get("complete") or snapshot.get("issues") or pool.get("warnings"):
         blocks.append("Inventario o topologia incompleti.")
-    if not re.match(r"^pve-manager/(8|9)\.", snapshot.get("pve_version", "")):
-        blocks.append("Versione Proxmox non supportata.")
+    if not lab_version_supported(snapshot):
+        blocks.append(VERSION_BLOCK)
     if snapshot.get("demo"):
         blocks.append("Modalità dimostrativa: nessuna modifica reale.")
     if snapshot.get("boot", {}).get("firmware_mode") != "UEFI" or snapshot.get("boot", {}).get("architecture") not in {"x86_64", "amd64"}:
@@ -638,8 +655,8 @@ def plan_offline(snapshot, request):
         blocks.append("Inventario o topologia non completamente verificati.")
     if snapshot.get("demo"):
         blocks.append("Modalità dimostrativa: nessuna modifica reale.")
-    if not re.match(r"^pve-manager/(8|9)\.", snapshot.get("pve_version", "")):
-        blocks.append("Versione Proxmox non supportata.")
+    if not lab_version_supported(snapshot):
+        blocks.append(VERSION_BLOCK)
     if pool["state"] not in GOOD | {"DEGRADED"} or pool["errors"] != "No known data errors" or "in progress" in pool["scan"]:
         blocks.append("Stato pool, errori permanenti o ricostruzione incompatibile.")
     if pool.get("role") not in {"BOOT", "MISTO", "DATI_VM"}:
@@ -658,8 +675,10 @@ def plan_offline(snapshot, request):
         blocks.append("Identità GUID incompleta.")
     if not disk.get("serial") or not disk.get("identity_verified") or sum(d.get("serial") == disk["serial"] for d in snapshot["disks"]) != 1:
         blocks.append("Identità fisica del disco da escludere non verificata.")
-    if request.get("profile") != "produzione" or not request.get("hot_swap_confirmed"):
-        blocks.append("Nel laboratorio senza hot swap usare lo spegnimento; in produzione verificare il vano.")
+    if request.get("profile") == "produzione":
+        blocks.append(PRODUCTION_BLOCK)
+    if request.get("profile") != "laboratorio_hot_swap" or not request.get("hot_swap_confirmed"):
+        blocks.append("La rimozione a caldo richiede il profilo laboratorio hot swap e la verifica del vano.")
     if "zpool" not in snapshot.get("tools", []):
         blocks.append("Strumento zpool non disponibile.")
     argv = ["zpool", "offline", pool["name"], old["guid"]]

@@ -2,7 +2,7 @@
 
 App desktop Windows in Python per diagnosticare dischi e pool ZFS di Proxmox VE 8 e 9 e guidare la sostituzione dei membri guasti. Interfaccia in italiano, collegamento SSH e comandi spiegati prima dell'approvazione. Codice originale con [licenza MIT](LICENSE).
 
-**Versione 0.5.2 da collaudare in laboratorio.** GUI, motore e helper sono implementati e verificati con test automatici e dati sintetici. Non è ancora certificata la compatibilità con server, bootloader o LED reali. Leggi la [matrice di compatibilità](docs/compatibilita.md) prima di usare operazioni modificative.
+**0.6.0rc1 · candidata per il laboratorio.** La 0.6 consolida identificazione, protezioni e ripresa. Per le nuove connessioni è preselezionata la sola lettura. Per il collaudo operativo sono predisposti i profili Proxmox VE 8.4, 9.0 e 9.1. Su 9.3 i piani di scrittura sono bloccati in attesa della verifica. La validazione per la produzione è ancora aperta. [Milestone e criteri di accettazione](docs/stabilizzazione-0.6.md)
 
 **Aggiornamento da versioni precedenti:** senza comandi attivi, usa **Installa / aggiorna helper sul nodo** dalla scheda Connessione e ripeti l'analisi. I piani richiedono app e helper della stessa versione. Le correzioni sono elencate nel [changelog](CHANGELOG.md).
 
@@ -14,7 +14,7 @@ In questa cartella esegui `avvia.cmd`. Se parti da un clone nuovo, installa Pyth
 
 Per il pacchetto compilato, estrai l'intero ZIP e avvia `ProxmoxZfsAssistant.exe`. Conserva tutte le librerie e le licenze della distribuzione.
 
-Puoi anche scaricare **ProxmoxZfsAssistant-0.5.2-Windows-Setup.exe** dalla [release 0.5.2](https://github.com/Rudi-Gomirato/proxmox-zfs-assistant/releases/tag/v0.5.2): installa app, librerie e licenze per l'utente corrente, senza richiedere Python. L'installer crea il collegamento nel menu Start e offre quello sul desktop. La disinstallazione conserva database, profili e chiavi host dell'app. Il pacchetto non è firmato digitalmente; confronta il suo SHA256 con `SHA256SUMS.txt` pubblicato nella stessa release.
+Puoi anche scaricare **ProxmoxZfsAssistant-0.6.0rc1-Windows-Setup.exe** dalla [candidata 0.6.0rc1](https://github.com/Rudi-Gomirato/proxmox-zfs-assistant/releases/tag/v0.6.0rc1): installa app, librerie e licenze per l'utente corrente, senza richiedere Python. L'installer crea il collegamento nel menu Start e offre quello sul desktop. La disinstallazione conserva database, profili e chiavi host dell'app. Il pacchetto non è firmato digitalmente; confronta il suo SHA256 con `SHA256SUMS.txt` pubblicato nella stessa release.
 
 ## Recupero EFI nella 0.5.2
 

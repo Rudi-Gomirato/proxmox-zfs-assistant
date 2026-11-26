@@ -441,3 +441,50 @@ def test_bootnext_dialog_requires_four_checks_and_exact_serial(app, tmp_path, mo
     assert all(queued[0][0]['confirmations'].values())
     assert not any(q[0]['op'] == 'uefi_reboot' for q in queued)
     window.close()
+
+def test_changed_serial_drops_target_even_when_alias_is_reused(app, tmp_path):
+    window = Window(tmp_path, demo=False)
+    snap = snapshot()
+    window.render_snapshot(snap)
+    window.pool_combo.setCurrentIndex(1)
+    window.target_combo.setCurrentIndex(0)
+    assert window.target_combo.currentData()
+    fresh = deepcopy(snap)
+    selected = next(d for d in fresh["disks"] if d["by_id"] == window.target_combo.currentData())
+    selected["serial"] = "DIFFERENT"
+    window.render_snapshot(fresh)
+    assert window.target_combo.currentIndex() == -1
+    assert window.pool_combo.currentData() == snap["pools"][1]["guid"]
+    window.render_snapshot(deepcopy({**fresh, "host_id": "another-host"}))
+    assert window.pool_combo.currentIndex() == -1
+    window.close()
+
+
+def test_linked_efi_button_opens_existing_job(app, tmp_path):
+    window = Window(tmp_path, demo=False)
+    parent = {"id": "parent", "pool": "rpool", "role": "BOOT", "action": "replace",
+              "state": "ESP_INITIALIZATION_LINKED", "initialization_job": "child"}
+    child = {"id": "child", "pool": "rpool", "role": "BOOT", "action": "repair_boot", "state": "BOOT_TEST_PENDING"}
+    window.render_jobs([child, parent])
+    assert window.continue_esp_button.isEnabled()
+    window.preview_job_esp()
+    assert window.jobs[window.job_table.currentRow()]["id"] == "child"
+    window.close()
+
+def test_reconnect_recovers_persisted_job_from_node(app, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    window = Window(tmp_path, demo=False)
+    snap = snapshot()
+    saved = {"id": "persisted", "state": "RUNNING", "action": "replace", "role": "DATI_VM"}
+    calls = []
+    def rpc(request):
+        calls.append(request["op"])
+        return {"collect": snap, "list_jobs": [saved], "status": {**saved, "state": "UNKNOWN"}}[request["op"]]
+    backend = SimpleNamespace(connection=SimpleNamespace(host="test"), rpc=rpc)
+    monkeypatch.setattr(window, "connection_from_form", lambda: backend)
+    monkeypatch.setattr(window, "asynchronous", lambda fn, done, label: done(fn()))
+    window.connect_live()
+    assert calls == ["collect", "list_jobs", "status"]
+    assert window.jobs[0]["state"] == "UNKNOWN"
+    assert window.jobs[0]["id"] == saved["id"]
+    window.close()

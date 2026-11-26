@@ -22,9 +22,14 @@ def same_disk_identity(left, right):
 def serial_alias(disk):
     """An independent by-id alias observed on this physical device."""
     serial = disk.get("serial", "")
-    return next((p for p in disk.get("aliases", []) if serial and serial in p.rsplit("/", 1)[-1]
-                 and p.startswith("/dev/disk/by-id/") and not p.rsplit("/", 1)[-1].startswith("wwn-")
-                 and not re.search(r"-part\d+$", p)), "")
+    if not serial:
+        return ""
+    suffix = re.compile(r"(?:^|[-_])" + re.escape(serial) + r"(?:_\d+)?$")
+    return next((path for path in disk.get("aliases", [])
+                 if path.startswith("/dev/disk/by-id/")
+                 and not path.rsplit("/", 1)[-1].startswith("wwn-")
+                 and not re.search(r"-part\d+$", path)
+                 and suffix.search(path.rsplit("/", 1)[-1])), "")
 
 
 def wwn_peers(disks, target):
@@ -33,7 +38,7 @@ def wwn_peers(disks, target):
 
 
 def composite_identity_verified(disks, target):
-    if not (target.get("identity_verified") and target.get("path") and target.get("by_id")
+    if not (physical_identity_verified(disks, target) and target.get("path") and target.get("by_id")
             and target.get("serial") and normalize_wwn(target.get("wwn"))):
         return False
     if sum(d.get("serial") == target["serial"] for d in disks) != 1:
@@ -49,7 +54,7 @@ def composite_identity_verified(disks, target):
 
 def physical_identity_verified(disks, target):
     """WWN is optional, but neither a duplicate WWN nor /dev/sdX proves identity."""
-    if not target or not target.get('identity_verified') or not target.get('by_id') or not target.get('serial'):
+    if not target or not target.get('identity_verified') or not (target.get('by_id') or '').startswith('/dev/disk/by-id/') or not target.get('serial'):
         return False
     if sum(d.get('serial') == target['serial'] for d in disks) != 1:
         return False
@@ -59,7 +64,7 @@ def physical_identity_verified(disks, target):
     if len(peers) == 1:
         return True
     alias = serial_alias(target)
-    return bool(alias and sum(alias in d.get('aliases', []) for d in disks) == 1)
+    return bool(alias and alias == target['by_id'] and sum(alias in d.get('aliases', []) for d in disks) == 1)
 
 
 def annotate_identities(disks):

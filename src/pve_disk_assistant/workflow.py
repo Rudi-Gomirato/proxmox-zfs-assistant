@@ -1,6 +1,6 @@
 """Shared workflow vocabulary and read-only observations; never authorizes writes."""
-from .core import GOOD, disk_for_member, leaves
-from .identity import normalize_wwn
+from .core import GOOD, disk_for_member, disk_for, partition_for, leaves
+from .identity import physical_identity_verified, normalize_wwn
 from .uefi import LABELS as UEFI_LABELS, PENDING as UEFI_PENDING
 
 ACTIVE_STATES = {"QUEUED", "RUNNING", "MONITORING", "WAITING_RESILVER"}
@@ -28,6 +28,39 @@ def should_refresh(job):
     return (job.get("state") in REVIEW_STATES | ACTIVE_STATES | UEFI_PENDING
             or job.get("action") in {"replace", "initialize_esp"} and job.get("state") in {"FAILED", "UNKNOWN"}
             or job.get("role") in {"BOOT", "MISTO"} and job.get("state") == "COMPLETED")
+
+
+def replacement_phases(job):
+    """Derive progress from the journal, including records written by earlier helpers."""
+    if job.get("action") != "replace":
+        return {}
+    state = job.get("state")
+    phases = {"Approvazione": "In attesa di approvazione", "Sostituzione ZFS": "Non iniziata",
+              "Resilver": "Non iniziata", "Configurazione EFI": "Non iniziata", "Avvio fisico": "Non iniziata"}
+    if job.get("approved_at"):
+        phases["Approvazione"] = "Completata e verificata"
+    if job.get("blocks") or state == "BLOCKED":
+        phases["Approvazione"] = "In attesa di intervento"
+    if state == "RUNNING":
+        phases["Sostituzione ZFS"] = "In esecuzione"
+    if state in {"FAILED", "FAILED_TO_START", "UNKNOWN"}:
+        phases["Sostituzione ZFS"] = "Interrotta" if state == "UNKNOWN" else "Fallita"
+    if any(e.get("phase") == "replace" and e.get("state") == "OK" for e in job.get("events", [])):
+        phases["Sostituzione ZFS"] = "In attesa di verifica"
+        phases["Resilver"] = "In attesa di verifica"
+    if job.get("zfs_state") == "IN_CORSO":
+        phases["Resilver"] = "In esecuzione"
+    if job.get("zfs_state") == "OK":
+        phases["Sostituzione ZFS"] = phases["Resilver"] = "Completata e verificata"
+    if job.get("role") == "DATI_VM":
+        phases["Configurazione EFI"] = phases["Avvio fisico"] = "Non applicabile"
+    elif state in {"BOOT_TEST_PENDING", "COMPLETED"} and job.get("boot_validation", {}).get("configuration_ready"):
+        phases["Configurazione EFI"] = "Completata e verificata"
+        phases["Avvio fisico"] = ("Completata e verificata" if state == "COMPLETED" and
+                                  job.get("boot_test") == "VERIFICATO_DALL_OPERATORE" else "In attesa di intervento")
+    elif state in {"ESP_INITIALIZATION_REQUIRED", "BOOT_REVIEW_REQUIRED", "ESP_INITIALIZATION_LINKED"}:
+        phases["Configurazione EFI"] = "In attesa di intervento"
+    return phases
 
 
 def next_step(job):
@@ -67,10 +100,11 @@ def observe_replacement(job, snapshot):
     result.update(pool_state=pool["state"], scan=pool.get("scan", ""), scan_percent=pool.get("scan_percent"))
     expected = job.get("target") or {}
     pairs = [(m, disk_for_member(snapshot, m)) for m in leaves(pool)]
-    matched = [(m, d) for m, d in pairs if d and d.get("identity_verified")
-               and d.get("serial") == expected.get("serial") and d.get("by_id") == expected.get("by_id")
+    matched = [(m, d) for m, d in pairs if physical_identity_verified(snapshot["disks"], d)
+               and d.get("serial") == expected.get("serial") and expected.get("by_id") in [d.get("by_id"), *d.get("aliases", [])]
                and (not expected.get("wwn") or normalize_wwn(d.get("wwn")) == normalize_wwn(expected["wwn"]))
-               and m.get("name") == job.get("new_member") and m.get("guid") and m["guid"] != job.get("old_guid")]
+               and disk_for(snapshot, job.get("new_member")) == d
+               and partition_for(d, m["name"]) == partition_for(d, job["new_member"]) and m.get("guid") and m["guid"] != job.get("old_guid")]
     if len(matched) != 1:
         return result
     member, disk = matched[0]

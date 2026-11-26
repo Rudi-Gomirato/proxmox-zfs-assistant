@@ -1,5 +1,13 @@
 # Modifiche
 
+## 0.6.0rc1 — 26 novembre 2026
+
+- Identità fisica verificata sul nodo, associazione di nomi brevi e GUID numerici osservati, blocco delle associazioni ambigue e verifica del membro sano prima di copiare la GPT.
+- Per concludere il resilver il monitor richiede una nuova osservazione di scan senza errori, il ricambio nella posizione prevista e gli altri GUID del vdev invariati.
+- Worker e riconciliazione serializzano gli aggiornamenti del journal. Alla riconnessione la GUI recupera gli interventi e permette di aprire un piano EFI già collegato.
+- Fasi di sostituzione nel journal e nel dettaglio dell'intervento. Visualizzazione di capacità esatta, ruolo, SMART e UUID nel dettaglio disco.
+- Profili operativi di laboratorio, compatibilità e collaudi ancora aperti nel [piano di stabilizzazione](docs/stabilizzazione-0.6.md).
+
 ## 0.5.2 — 18 novembre 2026
 
 - Percorso avanzato per una ESP con dati residui dopo il resilver. L’helper genera un piano distinto, verifica GPT, membro ZFS, disco alternativo, utilizzo della partizione e impronta del contenuto prima del format.

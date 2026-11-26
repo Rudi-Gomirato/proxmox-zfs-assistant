@@ -1,5 +1,8 @@
 # Compatibilità e stato del collaudo
 
+**0.6.0rc1.** I piani operativi sono riservati al laboratorio. I profili di versione ammessi sono 8.4, 9.0 e 9.1. Per le altre minor, inclusa 9.3, è disponibile la diagnostica. Le tabelle storiche sotto documentano il percorso implementativo. Per lo stato del collaudo fare riferimento alla [milestone 0.6](stabilizzazione-0.6.md).
+
+
 > **0.5.0, 17 novembre 2026:** test BootNext implementato per Proxmox 8/9, UEFI x86_64, root ZFS su mirror di due membri ONLINE e configurazione EFI verificata su entrambi. Richiede una voce UEFI già esistente, attiva e associata al PARTUUID e a un file riconosciuto. GRUB, shim con configurazione GRUB e systemd-boot sono rilevati dai dati; non viene presunto un nome file unico. Systemd-boot con Secure Boot, BIOS Legacy e layout non verificabili restano bloccati. Cluster/HA e VM/CT ancora accesi bloccano il riavvio dall'app. Nessun server reale è stato riavviato durante lo sviluppo. [Procedura e matrice di collaudo](test-uefi-0.5.md).
 
 > Aggiornamento 0.4.0: la nuova ESP richiede un piano distinto con conferma di formattazione; non riprende automaticamente dopo il resilver. Il ripristino delle ESP esistenti non formatta. Vedi la [procedura corrente](nuova-esp.md).

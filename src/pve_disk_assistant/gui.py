@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
 
 from . import __version__
 from .boot import boot_report
-from .core import (BAD, GOOD, anonymize, safety_fingerprint, data_groups, disk_for, disk_for_member, leaves,
+from .core import (VERSION_BLOCK, lab_version_supported, BAD, GOOD, anonymize, safety_fingerprint, data_groups, disk_for, disk_for_member, leaves,
                    raid_label, command_text)
 from .demo import DemoBackend
 from .store import Store
@@ -253,7 +253,7 @@ class Window(UefiMixin, QMainWindow):
         form = QFormLayout(form_group)
         self.pool_combo, self.old_combo, self.target_combo = QComboBox(), QComboBox(), QComboBox()
         self.profile = QComboBox()
-        self.profile.addItems(["Laboratorio · spegnimento obbligatorio", "Produzione · hot swap da verificare"])
+        self.profile.addItems(["Laboratorio · spegnimento obbligatorio", "Laboratorio · hot swap verificato"])
         form.addRow("Pool", self.pool_combo)
         form.addRow("Membro da sostituire", self.old_combo)
         form.addRow("Nuovo disco vuoto", self.target_combo)
@@ -351,7 +351,7 @@ class Window(UefiMixin, QMainWindow):
         form.addRow("Password / passphrase chiave", self.password)
         form.addRow(self.sudo)
         self.read_only = QCheckBox('Sola lettura e anteprima: nessuna esecuzione')
-        self.read_only.setChecked(saved.get('read_only', False))
+        self.read_only.setChecked(saved.get('read_only', True))
         form.addRow(self.read_only)
         retention = QSpinBox()
         retention.setRange(10, 10000)
@@ -424,12 +424,16 @@ class Window(UefiMixin, QMainWindow):
         can_continue = (job.get('action') == 'replace' and job.get('role') in {'BOOT', 'MISTO'}
                         and job.get('state') in {'ESP_INITIALIZATION_REQUIRED', 'BOOT_REVIEW_REQUIRED'})
         can_continue = can_continue or (job.get('state') == 'EFI_REPAIR_REQUIRED' and bool(job.get('replacement_id')))
+        linked = job.get("state") == "ESP_INITIALIZATION_LINKED"
+        if linked:
+            can_continue = any(j["id"] == job.get("initialization_job") for j in self.jobs)
+        self.continue_esp_button.setText("Apri intervento EFI collegato" if linked else "Prosegui con nuova ESP")
         self.continue_esp_button.setEnabled(can_continue)
         self.continue_esp_button.setToolTip('Prepara il piano EFI del ricambio selezionato.' if can_continue else
             'Seleziona una sostituzione di boot con ZFS ricostruito e fase EFI da completare. Aggiorna prima lo stato del nodo.')
         index = self.boot_table.currentRow()
         row = self.boot_rows[index]['disk'] if 0 <= index < len(self.boot_rows) else {}
-        present = bool(row.get('by_id'))
+        present = bool(self.snapshot and row.get('identity_verified') and row.get('by_id'))
         part = row.get('esp') or {}
         info = (self.snapshot or {}).get('boot', {}).get('esps', {}).get(part.get('path'), {})
         fat = row.get('checks', {}).get('fat32', {}).get('state') == 'OK'
@@ -542,6 +546,11 @@ class Window(UefiMixin, QMainWindow):
         if not 0 <= index < len(self.jobs):
             return
         job = self.jobs[index]
+        if job.get("state") == "ESP_INITIALIZATION_LINKED":
+            row = next((i for i, j in enumerate(self.jobs) if j["id"] == job.get("initialization_job")), -1)
+            if row >= 0:
+                self.job_table.setCurrentCell(row, 0)
+            return
         parent = job.get('replacement_id') if job.get('state') == 'EFI_REPAIR_REQUIRED' else job.get('id') if job.get('action') == 'replace' else None
         if not parent or job.get('role') not in {'BOOT', 'MISTO'}:
             QMessageBox.information(self, 'Nuova ESP', 'Seleziona la sostituzione del disco del mirror di boot.')
@@ -719,20 +728,54 @@ class Window(UefiMixin, QMainWindow):
             widget.setText(config.get(key, ''))
         self.port.setValue(config.get('port', 22))
         self.sudo.setChecked(config.get('sudo', False))
-        self.read_only.setChecked(config.get('read_only', False))
+        self.read_only.setChecked(config.get('read_only', True))
         self.password.clear()
         self.backend = None
         self.snapshot = None
         self.invalidate_plan()
         self.badge.setText('Profilo caricato: premi Collega e analizza')
 
+    def reset_connection(self, backend):
+        self.backend, self.snapshot, self.jobs, self.boot_rows = backend, None, [], []
+        self.invalidate_plan()
+        self.tree.clear()
+        for combo in (self.pool_combo, self.old_combo, self.target_combo):
+            combo.clear()
+        for table in (self.boot_table, self.disk_table, self.job_table):
+            table.setRowCount(0)
+        self.uefi_records = []
+        self.uefi_history.setRowCount(0)
+        self.boot_detail.clear()
+        self.system_disks.clear()
+        self.job_selected()
+        for label in self.card_values.values():
+            label.setText("—")
+        self.freshness.setText("In attesa di inventario")
+        self.issues.clear()
+
     def connect_live(self):
         backend = self.connection_from_form()
         if backend:
-            self.backend, self.snapshot, self.jobs = backend, None, []
-            self.invalidate_plan()
+            self.reset_connection(backend)
             self.badge.setText("SSH · " + backend.connection.host)
-            self.scan()
+            def reconnect():
+                snapshot = backend.rpc({"op": "collect"})
+                if snapshot.get("helper_version") != __version__:
+                    return snapshot, [], ""
+                try:
+                    return snapshot, self.read_jobs(backend), ""
+                except Exception as exc:
+                    return snapshot, [], str(exc)
+
+            def connected(result):
+                snapshot, jobs, error = result
+                self.render_snapshot(snapshot)
+                if error:
+                    self.issues.setText("Interventi non aggiornati. Usa Recupera interventi dal nodo. " + error)
+                else:
+                    self.render_jobs(jobs)
+
+            self.asynchronous(reconnect, connected, "Lettura del nodo e recupero degli interventi…")
 
     def install_helper(self):
         backend = self.connection_from_form()
@@ -744,8 +787,7 @@ class Window(UefiMixin, QMainWindow):
         if QMessageBox.question(self, "Installazione helper", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                 QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
             return
-        self.backend, self.snapshot, self.jobs = backend, None, []
-        self.invalidate_plan()
+        self.reset_connection(backend)
         self.asynchronous(backend.install, lambda r: QMessageBox.information(self, "Helper installato",
             "Helper installato. Ora premi Collega e analizza.\nSHA256: " + r["sha256"]), "Installazione helper…")
 
@@ -770,12 +812,18 @@ class Window(UefiMixin, QMainWindow):
         previous = self.snapshot
         if previous and previous['host_id'] == snapshot['host_id'] and snapshot['collected_at'] < previous['collected_at']:
             return
+        same_host = bool(previous and previous["host_id"] == snapshot["host_id"])
         combos = [self.pool_combo, self.old_combo, self.target_combo]
         choices = [c.currentData() for c in combos]
         selected = self.tree.currentItem()
         tree_key = selected.data(0, Qt.ItemDataRole.UserRole) if selected else None
-        disk = self.snapshot['disks'][self.disk_table.currentRow()].get('by_id') if self.snapshot and 0 <= self.disk_table.currentRow() < len(self.snapshot['disks']) else None
-        boot_key = self.boot_rows[self.boot_table.currentRow()]['disk']['by_id'] if 0 <= self.boot_table.currentRow() < len(self.boot_rows) else None
+        def key(disk):
+            return disk.get("by_id"), disk.get("serial"), disk.get("wwn")
+        selected_row = self.disk_table.currentRow()
+        disk = key(previous["disks"][selected_row]) if same_host and 0 <= selected_row < len(previous["disks"]) else None
+        selected_row = self.boot_table.currentRow()
+        boot_key = key(self.boot_rows[selected_row]["disk"]) if same_host and 0 <= selected_row < len(self.boot_rows) else None
+        target_key = next((key(d) for d in (previous or {}).get("disks", []) if d.get("by_id") == choices[2]), None)
         widgets = [self.tree, self.disk_table, self.boot_table, *combos]
         scrolls = [(w, w.verticalScrollBar().value(), w.horizontalScrollBar().value()) for w in widgets[:3]]
         plan = self.plan
@@ -784,14 +832,20 @@ class Window(UefiMixin, QMainWindow):
             w.blockSignals(True)
         try:
             self._render_snapshot(snapshot)
-            if previous:
+            if same_host:
                 self.pool_combo.setCurrentIndex(self.pool_combo.findData(choices[0]))
                 self.pool_changed()
                 for c, choice in zip(combos[1:], choices[1:]):
                     c.setCurrentIndex(c.findData(choice))
+                if not any(key(d) == target_key for d in snapshot["disks"]):
+                    self.target_combo.setCurrentIndex(-1)
+            else:
+                self.pool_combo.setCurrentIndex(-1)
+                self.pool_changed()
+                self.target_combo.setCurrentIndex(-1)
             self.tree.clearSelection()
             def restore(item):
-                if item.data(0, Qt.ItemDataRole.UserRole) == tree_key:
+                if same_host and tree_key and item.data(0, Qt.ItemDataRole.UserRole) == tree_key:
                     self.tree.setCurrentItem(item)
                 for i in range(item.childCount()):
                     restore(item.child(i))
@@ -800,17 +854,17 @@ class Window(UefiMixin, QMainWindow):
             self.disk_table.clearSelection()
             self.disk_table.setCurrentCell(-1, -1)
             for i, d in enumerate(snapshot['disks']):
-                if disk and d.get('by_id') == disk:
+                if disk and key(d) == disk:
                     self.disk_table.selectRow(i)
             if previous:
                 self.boot_table.clearSelection()
                 self.boot_table.setCurrentCell(-1, -1)
                 for i, row in enumerate(self.boot_rows):
-                    if boot_key and row['disk']['by_id'] == boot_key:
+                    if boot_key and key(row['disk']) == boot_key:
                         self.boot_table.selectRow(i)
             self.boot_detail.clear()
             self.boot_selected()
-            if plan and previous and safety_fingerprint(previous) == safety_fingerprint(snapshot):
+            if plan and same_host and safety_fingerprint(previous) == safety_fingerprint(snapshot):
                 self.plan = plan
                 self.render_plan(plan)
                 self.backup.setChecked(checks[0])
@@ -869,6 +923,8 @@ class Window(UefiMixin, QMainWindow):
         self.render_disks()
         self.render_boot()
         problems = snapshot["issues"] + [w for p in snapshot["pools"] for w in p.get("warnings", [])]
+        if not lab_version_supported(snapshot):
+            problems.append(VERSION_BLOCK)
         problems += snapshot.get('hardware_notes', [])
         problems += [w for d in snapshot['disks'] for w in d.get('identity_warnings', [])]
         if snapshot.get("helper_version") != __version__:
@@ -964,8 +1020,7 @@ class Window(UefiMixin, QMainWindow):
             self.plan_notice.description.setText('Seleziona il pool, il membro guasto e il ricambio. Genera un nuovo piano per verificare i prerequisiti.')
 
     def profile_changed(self, *_):
-        production = self.profile.currentIndex() == 1
-        self.hot_swap.setEnabled(production)
+        self.hot_swap.setEnabled(self.profile.currentIndex() == 1)
         self.hot_swap.setChecked(False)
         self.invalidate_plan()
 
@@ -1093,7 +1148,7 @@ class Window(UefiMixin, QMainWindow):
             QMessageBox.information(self, "Piano", "Serve un membro guasto o escluso e un ricambio vuoto riconosciuto. Prima della sostituzione fisica consulta le istruzioni; poi aggiorna l'analisi.")
             return
         request = {"pool_guid": pool["guid"], "old_guid": self.old_combo.currentData(), "target": self.target_combo.currentData(),
-                   "profile": "laboratorio" if self.profile.currentIndex() == 0 else "produzione",
+                   "profile": "laboratorio" if self.profile.currentIndex() == 0 else "laboratorio_hot_swap",
                    "hot_swap_confirmed": self.hot_swap.isChecked()}
         self.asynchronous(lambda: self.backend.rpc({"op": "plan", "request": request}), self.render_plan,
                           "Generazione del piano sul nodo e verifica dei prerequisiti…")
@@ -1104,7 +1159,7 @@ class Window(UefiMixin, QMainWindow):
             QMessageBox.information(self, "Rimozione", "Seleziona il membro problematico del pool.")
             return
         request = {"action": "offline", "pool_guid": pool["guid"], "old_guid": self.old_combo.currentData(),
-                   "profile": "produzione" if self.profile.currentIndex() == 1 else "laboratorio",
+                   "profile": "laboratorio_hot_swap" if self.profile.currentIndex() == 1 else "laboratorio",
                    "hot_swap_confirmed": self.hot_swap.isChecked()}
         self.asynchronous(lambda: self.backend.rpc({"op": "plan", "request": request}), self.render_plan, "Verifica della rimozione a caldo…")
 
@@ -1169,12 +1224,15 @@ class Window(UefiMixin, QMainWindow):
     def refresh_jobs(self):
         if not self.backend:
             return
-        def get():
-            jobs = self.backend.rpc({"op": "list_jobs"})
-            if isinstance(self.backend, SSHBackend) and self.backend.connection.read_only:
-                return jobs
-            return [self.backend.rpc({"op": "status", "id": j["id"]}) if should_refresh(j) else j for j in jobs if j.get("state") not in {"LED", "LED_FINISHED"}]
-        self.asynchronous(get, self.render_jobs, "Recupero degli interventi persistenti sul nodo…")
+        backend = self.backend
+        self.asynchronous(lambda: self.read_jobs(backend), self.render_jobs, "Recupero degli interventi persistenti sul nodo…")
+
+    @staticmethod
+    def read_jobs(backend):
+        jobs = [j for j in backend.rpc({"op": "list_jobs"}) if j.get("state") not in {"LED", "LED_FINISHED"}]
+        if isinstance(backend, SSHBackend) and backend.connection.read_only:
+            return jobs
+        return [backend.rpc({"op": "status", "id": j["id"]}) if should_refresh(j) else j for j in jobs]
 
     def render_jobs(self, jobs):
         for record in jobs:

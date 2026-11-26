@@ -48,7 +48,7 @@ def test_extended_data_vdevs_keep_existing_group(kind, count):
         member = deepcopy(group['children'][0])
         disk = deepcopy(core.disk_for_member(snapshot, member))
         suffix = str(len(group['children']))
-        disk.update(serial='EXTRA'+suffix, by_id='/dev/disk/by-id/ata-EXTRA'+suffix, path='/dev/extra'+suffix, aliases=[])
+        disk.update(serial='EXTRA'+suffix, by_id='/dev/disk/by-id/ata-EXTRA'+suffix, path='/dev/extra'+suffix, aliases=['/dev/disk/by-id/ata-EXTRA'+suffix], wwn='synthetic-'+suffix)
         member.update(name=disk['by_id'], guid='extra'+suffix)
         snapshot['disks'].append(disk)
         group['children'].append(member)

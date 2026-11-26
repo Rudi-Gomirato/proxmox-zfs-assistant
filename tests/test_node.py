@@ -208,6 +208,7 @@ def test_monitor_requires_the_new_member_and_clean_pool(sandbox, monkeypatch):
     pool = rebuilt["pools"][1]
     pool["state"] = pool["children"][0]["state"] = "ONLINE"
     leaf = core.leaves(pool)[1]
+    pool["scan"] = "resilvered 45G in 00:38:00 with 0 errors on synthetic-date"
     leaf.update(name=plan["new_member"], guid="999", state="ONLINE")
     monkeypatch.setattr(node, "collect", lambda: rebuilt)
     assert node.get_status(plan["id"])["state"] == "COMPLETED"

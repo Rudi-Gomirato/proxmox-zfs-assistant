@@ -110,8 +110,8 @@ def test_missing_guids_reject_instead_of_guessing():
 
 
 def test_hot_swap_is_an_explicit_capability():
-    assert any("hot swap" in b for b in plan(profile="produzione")["blocks"])
-    assert not plan(profile="produzione", hot_swap_confirmed=True)["blocks"]
+    assert any("hot swap" in b for b in plan(profile="laboratorio_hot_swap")["blocks"])
+    assert not plan(profile="laboratorio_hot_swap", hot_swap_confirmed=True)["blocks"]
 
 
 def test_unknown_states_do_not_disappear_silently():
@@ -241,7 +241,7 @@ def offline_inventory():
 
 
 def test_hot_removal_is_a_separate_approved_offline_plan():
-    result = plan(offline_inventory(), action="offline", profile="produzione", hot_swap_confirmed=True)
+    result = plan(offline_inventory(), action="offline", profile="laboratorio_hot_swap", hot_swap_confirmed=True)
     assert result["blocks"] == []
     assert result["action"] == "offline"
     assert result["steps"][0]["argv"] == ["zpool", "offline", "vmdata", "202"]
@@ -258,12 +258,12 @@ def test_hot_removal_is_a_separate_approved_offline_plan():
 def test_hot_removal_cannot_bypass_peer_or_identity_checks(mutate):
     snap = offline_inventory()
     mutate(snap)
-    assert plan(snap, action="offline", profile="produzione", hot_swap_confirmed=True)["blocks"]
+    assert plan(snap, action="offline", profile="laboratorio_hot_swap", hot_swap_confirmed=True)["blocks"]
 
 
 def test_offline_not_offered_for_absent_or_lab_member():
     with pytest.raises(core.SafetyError, match="assente"):
-        plan(action="offline", profile="produzione", hot_swap_confirmed=True)
+        plan(action="offline", profile="laboratorio_hot_swap", hot_swap_confirmed=True)
     assert plan(offline_inventory(), action="offline")["blocks"]
 
 

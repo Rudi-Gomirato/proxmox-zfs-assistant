@@ -3,7 +3,7 @@ import re
 from copy import deepcopy
 
 from .boot import boot_report, normalize_path
-from .core import SafetyError, GOOD, data_groups, digest, disk_for_member, leaves
+from .core import VERSION_BLOCK, lab_version_supported, SafetyError, GOOD, data_groups, digest, disk_for_member, leaves
 from .identity import normalize_wwn, physical_identity_verified
 
 PENDING = {'UEFI_SETTING_NEXT', 'UEFI_READY_REBOOT', 'UEFI_REBOOT_REQUESTED', 'UEFI_UNDETERMINED'}
@@ -38,8 +38,8 @@ def preflight(snapshot, request):
         raise SafetyError('Pool o disco selezionato non più presente.')
     if not physical_identity_verified(snapshot['disks'], target):
         blocks.append('Identità fisica ambigua o Disk by ID non verificato.')
-    if not re.match(r'^pve-manager/(8|9)\.', snapshot.get('pve_version', '')):
-        blocks.append('Versione Proxmox non supportata: richieste famiglie 8 o 9.')
+    if not lab_version_supported(snapshot):
+        blocks.append(VERSION_BLOCK)
     if target.get('table', {}).get('label') != 'gpt':
         blocks.append('Tabella GPT del disco selezionato non verificata.')
     root_pool = snapshot.get('root', {}).get('source', '').split('/')[0]
